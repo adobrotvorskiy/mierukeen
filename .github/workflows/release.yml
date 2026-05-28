@@ -30,7 +30,7 @@ jobs:
           go-version: '1.23'
 
       - name: Load pinned versions
-        run: cat build/versions.env >> "$GITHUB_ENV"
+        run: grep -E '^[A-Z_]+=' build/versions.env >> "$GITHUB_ENV"
 
       - name: Prepare payload tree
         run: |
