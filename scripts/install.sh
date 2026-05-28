@@ -2,16 +2,17 @@
 # install.sh — установщик mierukeen на Keenetic с Entware.
 #
 # Использование:
-#   curl -fsSL https://gitlab.com/adobrotvorskiy/mierukeen/-/raw/main/scripts/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/adobrotvorskiy/mierukeen/main/scripts/install.sh | sh
 #   curl -fsSL .../install.sh | sh -s -- --upgrade
 #   curl -fsSL .../install.sh | sh -s -- --version v0.1.0
 #
-# По умолчанию ставит последний релиз из gitlab.com/adobrotvorskiy/mierukeen.
+# По умолчанию ставит последний релиз из github.com/adobrotvorskiy/mierukeen.
 
 set -e
 
 PROJECT="adobrotvorskiy/mierukeen"
-GITLAB_PROJECT_ID_URL="https://gitlab.com/api/v4/projects/$(echo "$PROJECT" | sed 's|/|%2F|g')"
+GITHUB_API="https://api.github.com/repos/$PROJECT"
+GITHUB_DL="https://github.com/$PROJECT/releases/download"
 PREFIX="/opt"
 TMPDIR="${TMPDIR:-/tmp}/mierukeen-install.$$"
 ARCH=""
@@ -61,16 +62,16 @@ opkg install ca-bundle ca-certificates \
 # ── определяем версию релиза ────────────────────────────────────────
 if [ -z "$VERSION" ]; then
     log "ищем последний релиз"
-    VERSION="$(curl -fsSL "$GITLAB_PROJECT_ID_URL/releases" \
+    VERSION="$(curl -fsSL "$GITHUB_API/releases/latest" \
         | tr ',' '\n' | grep -m1 '"tag_name"' \
-        | sed -E 's/.*"tag_name":"([^"]+)".*/\1/')"
+        | sed -E 's/.*"tag_name":[[:space:]]*"([^"]+)".*/\1/')"
     [ -n "$VERSION" ] || die "не удалось получить последний релиз — задай --version vX.Y.Z"
 fi
 log "версия: $VERSION"
 
 # ── скачиваем tarball ──────────────────────────────────────────────
 TARBALL="mierukeen-${VERSION}-${ARCH}.tar.gz"
-URL="https://gitlab.com/${PROJECT}/-/releases/${VERSION}/downloads/${TARBALL}"
+URL="${GITHUB_DL}/${VERSION}/${TARBALL}"
 mkdir -p "$TMPDIR"
 trap 'rm -rf "$TMPDIR"' EXIT
 log "качаю $URL"

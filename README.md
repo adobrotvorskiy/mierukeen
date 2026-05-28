@@ -14,13 +14,14 @@
 На роутере (с уже установленной Entware):
 
 ```sh
-curl -fsSL https://gitlab.com/adobrotvorskiy/mierukeen/-/raw/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/adobrotvorskiy/mierukeen/main/scripts/install.sh | sh
 ```
 
 **Перед стартом**:
 
-1. В UI Keenetic зайди в **Сетевые правила → Политики** (или **Профили доступа** в новых прошивках) и создай политику с именем `Mierukeen`. Подключения внутри неё можно оставить пустыми — она нужна только как «контейнер» для маркировки трафика.
-2. Привяжи к ней устройства, которые должны ходить через mieru (Мои сети и Wi-Fi → конкретное устройство → закрепить за политикой).
+1. В UI Keenetic зайди в **Сетевые правила → Политики** (или **Профили доступа** в новых прошивках) и создай политику с именем `Mierukeen`.
+2. **Обязательно отметь внутри неё хотя бы одно интернет-соединение** (обычно — твой основной провайдер / WAN). Без этого NDMS отвечает `Refused` на DNS-запросы от устройств политики, и они вообще не получают интернета — даже до нашего sing-box не доходят. По факту трафик пойдёт **не** через это соединение благодаря нашим iptables-правилам, но Keenetic так разрешит DNS.
+3. Привяжи к ней устройства, которые должны ходить через mieru (Мои сети и Wi-Fi → конкретное устройство → закрепить за политикой).
 3. Отредактируй mieru-профиль на роутере: `vi /opt/etc/mkeen/profiles/default/mieru.json` — впиши свой mieru-сервер (`REPLACE_ME_*`).
 4. Привяжи mkeen к политике (если установщик не сделал это сам):
 
@@ -138,12 +139,12 @@ scripts/
   install.sh                   # установщик
 build/
   versions.env                 # пиннинг mieru/sing-box версий
-.gitlab-ci.yml                 # кросс-сборка -> release
+.github/workflows/release.yml  # кросс-сборка -> GitHub Release
 ```
 
 ## Релизы
 
-GitLab CI собирает на каждый тег `vX.Y.Z` два архива: `mierukeen-vX.Y.Z-mipsle-softfloat.tar.gz` и `...-arm64.tar.gz`. Они доступны через release links и используются `install.sh`.
+GitHub Actions собирает на каждый тег `vX.Y.Z` два архива: `mierukeen-vX.Y.Z-mipsle-softfloat.tar.gz` и `...-arm64.tar.gz`. Они публикуются как [GitHub Releases](https://github.com/adobrotvorskiy/mierukeen/releases) и тянутся `install.sh` через `releases/download/vX.Y.Z/...`.
 
 ## Лицензия
 

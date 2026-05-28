@@ -220,7 +220,7 @@ EOF
 }
 
 cmd_update() {
-    url="https://gitlab.com/adobrotvorskiy/mierukeen/-/raw/main/scripts/install.sh"
+    url="https://raw.githubusercontent.com/adobrotvorskiy/mierukeen/main/scripts/install.sh"
     log "перекачиваю install.sh и перезапускаю"
     curl -fsSL "$url" | sh -s -- --upgrade
 }
