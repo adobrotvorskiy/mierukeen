@@ -1,0 +1,25 @@
+{
+  "activeProfile": "default",
+  "profiles": [
+    {
+      "profileName": "default",
+      "user": {
+        "name": "REPLACE_ME_USER",
+        "password": "REPLACE_ME_PASSWORD"
+      },
+      "servers": [
+        {
+          "ipAddress": "REPLACE_ME_SERVER_IP",
+          "portBindings": [
+            { "port": 2999, "protocol": "TCP" }
+          ]
+        }
+      ],
+      "mtu": 1400,
+      "multiplexing": { "level": "MULTIPLEXING_LOW" }
+    }
+  ],
+  "socks5Port": 1080,
+  "socks5ListenLAN": false,
+  "loggingLevel": "INFO"
+}

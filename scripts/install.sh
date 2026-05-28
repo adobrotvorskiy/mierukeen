@@ -1,0 +1,128 @@
+#!/bin/sh
+# install.sh — установщик mierukeen на Keenetic с Entware.
+#
+# Использование:
+#   curl -fsSL https://gitlab.com/adobrotvorskiy/mierukeen/-/raw/main/scripts/install.sh | sh
+#   curl -fsSL .../install.sh | sh -s -- --upgrade
+#   curl -fsSL .../install.sh | sh -s -- --version v0.1.0
+#
+# По умолчанию ставит последний релиз из gitlab.com/adobrotvorskiy/mierukeen.
+
+set -e
+
+PROJECT="adobrotvorskiy/mierukeen"
+GITLAB_PROJECT_ID_URL="https://gitlab.com/api/v4/projects/$(echo "$PROJECT" | sed 's|/|%2F|g')"
+PREFIX="/opt"
+TMPDIR="${TMPDIR:-/tmp}/mierukeen-install.$$"
+ARCH=""
+VERSION=""
+UPGRADE=0
+
+log() { echo "[install] $*"; }
+die() { echo "[install] ERROR: $*" >&2; exit 1; }
+
+# ── параметры ────────────────────────────────────────────────────────
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --upgrade) UPGRADE=1 ;;
+        --version) VERSION="$2"; shift ;;
+        --arch)    ARCH="$2"; shift ;;
+        *) die "unknown arg: $1" ;;
+    esac
+    shift
+done
+
+# ── проверки окружения ──────────────────────────────────────────────
+[ -d "$PREFIX" ] || die "нет $PREFIX — Entware не установлен?"
+command -v opkg >/dev/null 2>&1 || die "нет opkg"
+command -v curl >/dev/null 2>&1 || die "нет curl (opkg install curl)"
+
+# ── определяем архитектуру ──────────────────────────────────────────
+if [ -z "$ARCH" ]; then
+    MACH="$(uname -m)"
+    case "$MACH" in
+        mips)    ARCH="mipsle-softfloat" ;;   # MT7621 (KN-1010/1810/...)
+        mipsel)  ARCH="mipsle-softfloat" ;;
+        aarch64) ARCH="arm64" ;;
+        armv7l)  ARCH="armv7" ;;
+        *)       die "не поддерживаемая архитектура: $MACH" ;;
+    esac
+fi
+log "целевая архитектура: $ARCH"
+
+# ── зависимости из Entware ──────────────────────────────────────────
+log "ставим зависимости из opkg"
+opkg update >/dev/null 2>&1 || true
+opkg install ca-bundle ca-certificates \
+             iptables iptables-mod-tproxy iptables-mod-conntrack-extra \
+             ip-full ipset jq \
+             curl tar gzip >/dev/null
+
+# ── определяем версию релиза ────────────────────────────────────────
+if [ -z "$VERSION" ]; then
+    log "ищем последний релиз"
+    VERSION="$(curl -fsSL "$GITLAB_PROJECT_ID_URL/releases" \
+        | tr ',' '\n' | grep -m1 '"tag_name"' \
+        | sed -E 's/.*"tag_name":"([^"]+)".*/\1/')"
+    [ -n "$VERSION" ] || die "не удалось получить последний релиз — задай --version vX.Y.Z"
+fi
+log "версия: $VERSION"
+
+# ── скачиваем tarball ──────────────────────────────────────────────
+TARBALL="mierukeen-${VERSION}-${ARCH}.tar.gz"
+URL="https://gitlab.com/${PROJECT}/-/releases/${VERSION}/downloads/${TARBALL}"
+mkdir -p "$TMPDIR"
+trap 'rm -rf "$TMPDIR"' EXIT
+log "качаю $URL"
+curl -fL "$URL" -o "$TMPDIR/$TARBALL" || die "не удалось скачать $TARBALL"
+
+# ── распаковка ──────────────────────────────────────────────────────
+log "распаковываю в $PREFIX"
+if [ "$UPGRADE" -eq 1 ] && [ -x "$PREFIX/etc/init.d/S99mkeen" ]; then
+    log "stop старого инстанса"
+    "$PREFIX/etc/init.d/S99mkeen" stop || true
+fi
+
+# Конфиги пользователя не перетираем
+tar -xzf "$TMPDIR/$TARBALL" -C "$TMPDIR"
+SRC="$TMPDIR/payload"
+[ -d "$SRC" ] || SRC="$TMPDIR"
+
+# бинари + скрипты — копируем всегда
+cp "$SRC/opt/sbin/mieru"     "$PREFIX/sbin/mieru"
+cp "$SRC/opt/sbin/sing-box"  "$PREFIX/sbin/sing-box"
+cp "$SRC/opt/sbin/mkeen"     "$PREFIX/sbin/mkeen"
+cp "$SRC/opt/etc/init.d/S99mkeen" "$PREFIX/etc/init.d/S99mkeen"
+chmod +x "$PREFIX/sbin/mieru" "$PREFIX/sbin/sing-box" "$PREFIX/sbin/mkeen" \
+         "$PREFIX/etc/init.d/S99mkeen"
+
+# дефолтные конфиги — только если профиля ещё нет
+mkdir -p "$PREFIX/etc/mkeen/profiles/default" "$PREFIX/var/log" \
+         "$PREFIX/var/run" "$PREFIX/var/lib/sing-box"
+for f in mieru.json singbox.json; do
+    dst="$PREFIX/etc/mkeen/profiles/default/$f"
+    if [ ! -f "$dst" ]; then
+        cp "$SRC/opt/etc/mkeen/profiles/default/$f" "$dst"
+        log "создан $dst"
+    else
+        log "оставляю существующий $dst"
+    fi
+done
+[ -L "$PREFIX/etc/mkeen/active" ] || \
+    ln -sfn "$PREFIX/etc/mkeen/profiles/default" "$PREFIX/etc/mkeen/active"
+
+cat <<EOF
+
+✓ mierukeen ${VERSION} установлен.
+
+Дальше:
+  1) Отредактируй mieru-профиль: $PREFIX/etc/mkeen/profiles/default/mieru.json
+     (REPLACE_ME_* поля — креды и адрес твоего mieru-сервера)
+  2) Старт:        mkeen -start
+     Статус:       mkeen -status
+     Логи:         mkeen -log
+  3) Проверь с LAN-клиента: curl https://ifconfig.me
+     (должен показать IP mieru-сервера)
+
+Документация: https://gitlab.com/${PROJECT}
+EOF

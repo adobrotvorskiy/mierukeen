@@ -1,0 +1,139 @@
+#!/bin/sh
+# S99mkeen — старт mieru + sing-box и настройка tproxy.
+# Стиль init-скриптов Entware (start/stop/restart/status/check).
+
+PREFIX="/opt"
+CONF="$PREFIX/etc/mkeen"
+RUN="$PREFIX/var/run"
+LOG="$PREFIX/var/log"
+ACTIVE="$CONF/active"
+
+SINGBOX_BIN="$PREFIX/sbin/sing-box"
+MIERU_BIN="$PREFIX/sbin/mieru"
+
+MIERU_CONF="$ACTIVE/mieru.json"
+SINGBOX_CONF="$ACTIVE/singbox.json"
+
+PID_SINGBOX="$RUN/sing-box.pid"
+# mieru сам управляет своим жизненным циклом (mieru start/stop/status),
+# конфиг применяется один раз через `mieru apply config`. PID не трекаем.
+
+LOG_MIERU="$LOG/mieru.log"
+LOG_SINGBOX="$LOG/sing-box.log"
+
+FWMARK="0x1"
+RT_TABLE="100"
+CHAIN="MIERUKEEN"
+
+read_tproxy_port() {
+    p="$(grep -oE '"listen_port"[[:space:]]*:[[:space:]]*[0-9]+' "$SINGBOX_CONF" 2>/dev/null \
+         | grep -oE '[0-9]+' | head -1)"
+    echo "${p:-7895}"
+}
+
+mkdir -p "$RUN" "$LOG"
+
+# ── helpers ──────────────────────────────────────────────────────────
+is_running() {
+    pid="$1"
+    [ -f "$pid" ] && kill -0 "$(cat "$pid")" 2>/dev/null
+}
+
+# ── tproxy: ip rule/route + iptables mangle ──────────────────────────
+tproxy_up() {
+    tport="$(read_tproxy_port)"
+    ip rule add fwmark "$FWMARK" lookup "$RT_TABLE" 2>/dev/null || true
+    ip route add local default dev lo table "$RT_TABLE" 2>/dev/null || true
+
+    iptables -t mangle -N "$CHAIN" 2>/dev/null || iptables -t mangle -F "$CHAIN"
+    # bypass служебных и приватных сетей
+    for n in 0.0.0.0/8 127.0.0.0/8 10.0.0.0/8 169.254.0.0/16 \
+             172.16.0.0/12 192.168.0.0/16 224.0.0.0/4 240.0.0.0/4 \
+             255.255.255.255/32; do
+        iptables -t mangle -A "$CHAIN" -d "$n" -j RETURN
+    done
+    # сам трафик роутера — мимо (избегаем петель)
+    iptables -t mangle -A "$CHAIN" -m owner --uid-owner 0 -j RETURN 2>/dev/null || true
+    # маркируем и в tproxy
+    iptables -t mangle -A "$CHAIN" -p tcp -j TPROXY \
+        --on-port "$tport" --tproxy-mark "$FWMARK"
+    iptables -t mangle -A "$CHAIN" -p udp -j TPROXY \
+        --on-port "$tport" --tproxy-mark "$FWMARK"
+    # вешаем на PREROUTING (форвард-трафик от клиентов LAN)
+    iptables -t mangle -C PREROUTING -j "$CHAIN" 2>/dev/null || \
+        iptables -t mangle -A PREROUTING -j "$CHAIN"
+}
+
+tproxy_down() {
+    iptables -t mangle -D PREROUTING -j "$CHAIN" 2>/dev/null || true
+    iptables -t mangle -F "$CHAIN" 2>/dev/null || true
+    iptables -t mangle -X "$CHAIN" 2>/dev/null || true
+    ip rule del fwmark "$FWMARK" lookup "$RT_TABLE" 2>/dev/null || true
+    ip route flush table "$RT_TABLE" 2>/dev/null || true
+}
+
+# ── start / stop ─────────────────────────────────────────────────────
+do_start() {
+    [ -d "$ACTIVE" ] || ln -sfn "$CONF/profiles/default" "$ACTIVE"
+    [ -x "$MIERU_BIN" ]   || { echo "нет $MIERU_BIN"; exit 1; }
+    [ -x "$SINGBOX_BIN" ] || { echo "нет $SINGBOX_BIN"; exit 1; }
+    [ -f "$MIERU_CONF" ]   || { echo "нет $MIERU_CONF — заполни профиль"; exit 1; }
+    [ -f "$SINGBOX_CONF" ] || { echo "нет $SINGBOX_CONF"; exit 1; }
+
+    echo "[mkeen] apply mieru config"
+    "$MIERU_BIN" apply config "$MIERU_CONF" >> "$LOG_MIERU" 2>&1 || {
+        echo "[mkeen] mieru apply config failed — см. $LOG_MIERU"; exit 1; }
+    echo "[mkeen] start mieru"
+    "$MIERU_BIN" start >> "$LOG_MIERU" 2>&1 || {
+        echo "[mkeen] mieru start failed — см. $LOG_MIERU"; exit 1; }
+
+    if ! is_running "$PID_SINGBOX"; then
+        echo "[mkeen] start sing-box"
+        "$SINGBOX_BIN" run -c "$SINGBOX_CONF" >> "$LOG_SINGBOX" 2>&1 &
+        echo $! > "$PID_SINGBOX"
+        sleep 1
+    fi
+
+    echo "[mkeen] setup tproxy (mark $FWMARK)"
+    tproxy_up
+    echo "[mkeen] started"
+}
+
+do_stop() {
+    echo "[mkeen] teardown tproxy"
+    tproxy_down
+    if is_running "$PID_SINGBOX"; then
+        kill "$(cat "$PID_SINGBOX")" 2>/dev/null
+        sleep 1
+        kill -9 "$(cat "$PID_SINGBOX")" 2>/dev/null || true
+    fi
+    rm -f "$PID_SINGBOX"
+    echo "[mkeen] stop mieru"
+    "$MIERU_BIN" stop >> "$LOG_MIERU" 2>&1 || true
+    echo "[mkeen] stopped"
+}
+
+do_status() {
+    echo "── mieru ──"
+    "$MIERU_BIN" status 2>/dev/null || echo "mieru: stopped"
+    echo "── sing-box ──"
+    if is_running "$PID_SINGBOX"; then
+        echo "sing-box: running (pid $(cat "$PID_SINGBOX"))"
+    else
+        echo "sing-box: stopped"
+    fi
+    if iptables -t mangle -L "$CHAIN" -n >/dev/null 2>&1; then
+        echo "tproxy: up (chain $CHAIN, port $(read_tproxy_port))"
+    else
+        echo "tproxy: down"
+    fi
+}
+
+case "$1" in
+    start)   do_start ;;
+    stop)    do_stop ;;
+    restart) do_stop; do_start ;;
+    status)  do_status ;;
+    check)   "$MIERU_BIN" status >/dev/null 2>&1 && is_running "$PID_SINGBOX" ;;
+    *)       echo "usage: $0 {start|stop|restart|status|check}"; exit 1 ;;
+esac

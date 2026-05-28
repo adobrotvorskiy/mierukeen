@@ -1,0 +1,6 @@
+out/
+src/
+*.tar.gz
+*.sha256
+.idea/
+.vscode/

@@ -1,0 +1,195 @@
+#!/bin/sh
+# mkeen — управление mieru + sing-box на Keenetic/Entware.
+# Минимальный CLI в стиле xkeen.
+
+PREFIX="/opt"
+CONF="$PREFIX/etc/mkeen"
+RUN="$PREFIX/var/run"
+LOG="$PREFIX/var/log"
+INIT="$PREFIX/etc/init.d/S99mkeen"
+PROFILES="$CONF/profiles"
+ACTIVE_LINK="$CONF/active"
+
+SINGBOX_BIN="$PREFIX/sbin/sing-box"
+MIERU_BIN="$PREFIX/sbin/mieru"
+
+log()  { echo "[mkeen] $*"; }
+die()  { echo "[mkeen] ERROR: $*" >&2; exit 1; }
+
+active_profile() {
+    if [ -L "$ACTIVE_LINK" ]; then
+        basename "$(readlink "$ACTIVE_LINK")"
+    else
+        echo "default"
+    fi
+}
+
+cmd_start()   { "$INIT" start;   }
+cmd_stop()    { "$INIT" stop;    }
+cmd_restart() { "$INIT" restart; }
+cmd_status()  { "$INIT" status;  }
+
+cmd_log() {
+    case "$1" in
+        mieru)   tail -F "$LOG/mieru.log"   ;;
+        singbox) tail -F "$LOG/sing-box.log" ;;
+        *)       tail -F "$LOG/mieru.log" "$LOG/sing-box.log" ;;
+    esac
+}
+
+cmd_profile() {
+    sub="$1"; shift
+    case "$sub" in
+        list)
+            cur="$(active_profile)"
+            for p in "$PROFILES"/*/; do
+                [ -d "$p" ] || continue
+                name="$(basename "$p")"
+                if [ "$name" = "$cur" ]; then
+                    echo "* $name"
+                else
+                    echo "  $name"
+                fi
+            done
+            ;;
+        use)
+            name="$1"
+            [ -d "$PROFILES/$name" ] || die "профиль не найден: $name"
+            ln -sfn "$PROFILES/$name" "$ACTIVE_LINK"
+            log "активирован профиль: $name"
+            log "перезапусти: mkeen -restart"
+            ;;
+        show)
+            name="${1:-$(active_profile)}"
+            [ -d "$PROFILES/$name" ] || die "профиль не найден: $name"
+            echo "── $name ──"
+            for f in mieru.json singbox.json; do
+                echo "─── $f ───"
+                cat "$PROFILES/$name/$f" 2>/dev/null || echo "(нет)"
+            done
+            ;;
+        add)
+            name="$1"
+            [ -n "$name" ] || die "usage: mkeen profile add <name>"
+            [ ! -d "$PROFILES/$name" ] || die "уже существует: $name"
+            mkdir -p "$PROFILES/$name"
+            cp "$PROFILES/default/mieru.json"   "$PROFILES/$name/mieru.json"
+            cp "$PROFILES/default/singbox.json" "$PROFILES/$name/singbox.json"
+            log "создан профиль: $name"
+            log "отредактируй: $PROFILES/$name/{mieru,singbox}.json"
+            ;;
+        rm)
+            name="$1"
+            [ -n "$name" ] || die "usage: mkeen profile rm <name>"
+            [ "$name" != "default" ] || die "default удалять нельзя"
+            [ "$name" != "$(active_profile)" ] || die "нельзя удалить активный профиль"
+            rm -rf "$PROFILES/$name"
+            log "удалён профиль: $name"
+            ;;
+        *)
+            echo "usage: mkeen profile {list|use <name>|show [name]|add <name>|rm <name>}"
+            exit 1
+            ;;
+    esac
+}
+
+# ── routes ───────────────────────────────────────────────────────────
+# Правила пишутся прямо в singbox.json активного профиля. Каждое
+# user-правило помечается полем "_mkeen_user": true — это позволяет
+# find/remove. Pattern с "/" трактуется как CIDR, иначе как domain_suffix.
+# Маппинг dest: proxy→mieru-out, direct→direct, block→block.
+cmd_route() {
+    command -v jq >/dev/null 2>&1 || die "нужен jq (opkg install jq)"
+    sub="$1"; shift
+    cfg="$PROFILES/$(active_profile)/singbox.json"
+    [ -f "$cfg" ] || die "нет $cfg"
+
+    case "$sub" in
+        add)
+            pattern="$1"; dest="$2"
+            [ -n "$pattern" ] && [ -n "$dest" ] || \
+                die "usage: mkeen route add <domain|cidr> <proxy|direct|block>"
+            case "$dest" in
+                proxy)  outbound=mieru-out ;;
+                direct) outbound=direct ;;
+                block)  outbound=block ;;
+                *)      die "dest: proxy|direct|block" ;;
+            esac
+            if echo "$pattern" | grep -q '/'; then
+                rule_key=ip_cidr
+            else
+                rule_key=domain_suffix
+            fi
+            tmp="$(mktemp)"
+            jq --arg p "$pattern" --arg k "$rule_key" --arg ob "$outbound" '
+                .route.rules = ([{ "_mkeen_user": true, ($k): [$p], "outbound": $ob }] + .route.rules)
+            ' "$cfg" > "$tmp" && mv "$tmp" "$cfg"
+            log "+ $pattern ($rule_key) -> $dest"
+            log "применить: mkeen route reload"
+            ;;
+        del)
+            pattern="$1"
+            [ -n "$pattern" ] || die "usage: mkeen route del <domain|cidr>"
+            tmp="$(mktemp)"
+            jq --arg p "$pattern" '
+                .route.rules = [.route.rules[] | select(
+                    (._mkeen_user // false | not)
+                    or
+                    (((.domain_suffix // []) + (.ip_cidr // [])) | index($p) | not)
+                )]
+            ' "$cfg" > "$tmp" && mv "$tmp" "$cfg"
+            log "− $pattern"
+            log "применить: mkeen route reload"
+            ;;
+        list)
+            jq -r '
+                .route.rules
+                | map(select(._mkeen_user == true))
+                | .[]
+                | "  " + ((.domain_suffix // .ip_cidr // [])[0]) + " -> " + .outbound
+            ' "$cfg"
+            ;;
+        reload)
+            cmd_restart
+            ;;
+        *)
+            echo "usage: mkeen route {add <pat> <proxy|direct|block>|del <pat>|list|reload}"
+            exit 1
+            ;;
+    esac
+}
+
+cmd_update() {
+    url="https://gitlab.com/adobrotvorskiy/mierukeen/-/raw/main/scripts/install.sh"
+    log "перекачиваю install.sh и перезапускаю"
+    curl -fsSL "$url" | sh -s -- --upgrade
+}
+
+case "$1" in
+    -start|start)     cmd_start ;;
+    -stop|stop)       cmd_stop ;;
+    -restart|restart) cmd_restart ;;
+    -status|status)   cmd_status ;;
+    -log|log)         shift; cmd_log "$@" ;;
+    profile)          shift; cmd_profile "$@" ;;
+    route)            shift; cmd_route "$@" ;;
+    update)           cmd_update ;;
+    ""|-h|--help|help)
+        cat <<EOF
+mkeen — mieru + sing-box на Keenetic
+
+  mkeen -start | -stop | -restart | -status
+  mkeen -log [mieru|singbox]
+  mkeen profile list | use <name> | show [name] | add <name> | rm <name>
+  mkeen route add <domain|cidr> <proxy|direct|block>
+  mkeen route del <domain|cidr>
+  mkeen route list | reload
+  mkeen update
+
+Активный профиль: $(active_profile)
+Конфиги:          $CONF
+Логи:             $LOG
+EOF
+        ;;
+    *) die "неизвестная команда: $1 (mkeen --help)" ;;
+esac

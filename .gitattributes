@@ -1,0 +1,11 @@
+* text=auto eol=lf
+
+*.sh        text eol=lf
+*.json      text eol=lf
+*.yml       text eol=lf
+*.env       text eol=lf
+S99mkeen    text eol=lf
+mkeen       text eol=lf
+README.md   text eol=lf
+LICENSE     text eol=lf
+.gitignore  text eol=lf
