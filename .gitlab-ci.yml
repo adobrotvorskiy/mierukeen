@@ -17,10 +17,11 @@ variables:
     - echo "MIERU=$MIERU_VERSION  SING_BOX=$SINGBOX_VERSION  TARGET=$ARCH_LABEL"
   script:
     - set -e
-    - mkdir -p out/payload/opt/sbin out/payload/opt/etc/init.d out/payload/opt/etc/mkeen/profiles/default
+    - mkdir -p out/payload/opt/sbin out/payload/opt/etc/init.d out/payload/opt/etc/mkeen/profiles/default out/payload/opt/etc/ndm/netfilter.d
     # ── копируем скрипты/конфиги из репо ──
     - cp opt/sbin/mkeen                                    out/payload/opt/sbin/mkeen
     - cp opt/etc/init.d/S99mkeen                           out/payload/opt/etc/init.d/S99mkeen
+    - cp opt/etc/ndm/netfilter.d/mierukeen.sh              out/payload/opt/etc/ndm/netfilter.d/mierukeen.sh
     - cp opt/etc/mkeen/profiles/default/mieru.json         out/payload/opt/etc/mkeen/profiles/default/
     - cp opt/etc/mkeen/profiles/default/singbox.json       out/payload/opt/etc/mkeen/profiles/default/
     # ── собираем mieru ──

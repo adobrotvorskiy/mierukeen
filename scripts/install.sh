@@ -93,8 +93,11 @@ cp "$SRC/opt/sbin/mieru"     "$PREFIX/sbin/mieru"
 cp "$SRC/opt/sbin/sing-box"  "$PREFIX/sbin/sing-box"
 cp "$SRC/opt/sbin/mkeen"     "$PREFIX/sbin/mkeen"
 cp "$SRC/opt/etc/init.d/S99mkeen" "$PREFIX/etc/init.d/S99mkeen"
+mkdir -p "$PREFIX/etc/ndm/netfilter.d"
+cp "$SRC/opt/etc/ndm/netfilter.d/mierukeen.sh" "$PREFIX/etc/ndm/netfilter.d/mierukeen.sh"
 chmod +x "$PREFIX/sbin/mieru" "$PREFIX/sbin/sing-box" "$PREFIX/sbin/mkeen" \
-         "$PREFIX/etc/init.d/S99mkeen"
+         "$PREFIX/etc/init.d/S99mkeen" \
+         "$PREFIX/etc/ndm/netfilter.d/mierukeen.sh"
 
 # дефолтные конфиги — только если профиля ещё нет
 mkdir -p "$PREFIX/etc/mkeen/profiles/default" "$PREFIX/var/log" \
