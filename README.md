@@ -17,11 +17,19 @@
 curl -fsSL https://gitlab.com/adobrotvorskiy/mierukeen/-/raw/main/scripts/install.sh | sh
 ```
 
-Дальше:
+**Перед стартом**:
 
-1. Отредактируй `/opt/etc/mkeen/profiles/default/mieru.json` — впиши адрес/порт/креды своего mieru-сервера на месте `REPLACE_ME_*`.
-2. По желанию подкрути `singbox.json` (например, измени `clash_api.secret`, добавь свой DNS).
-3. Запусти:
+1. В UI Keenetic зайди в **Сетевые правила → Политики** (или **Профили доступа** в новых прошивках) и создай политику с именем `Mierukeen`. Подключения внутри неё можно оставить пустыми — она нужна только как «контейнер» для маркировки трафика.
+2. Привяжи к ней устройства, которые должны ходить через mieru (Мои сети и Wi-Fi → конкретное устройство → закрепить за политикой).
+3. Отредактируй mieru-профиль на роутере: `vi /opt/etc/mkeen/profiles/default/mieru.json` — впиши свой mieru-сервер (`REPLACE_ME_*`).
+4. Привяжи mkeen к политике (если установщик не сделал это сам):
+
+```sh
+mkeen ndms detect       # ищет политику Mierukeen, сохраняет её mark
+mkeen ndms status       # показывает текущую привязку
+```
+
+5. Запусти:
 
 ```sh
 mkeen -start
@@ -29,11 +37,13 @@ mkeen -status
 mkeen -log
 ```
 
-Проверка с LAN-клиента (телефон, ноут в той же сети):
+Проверка с устройства, привязанного к политике в UI:
 
 ```
 curl https://ifconfig.me   # должен быть IP mieru-сервера
 ```
+
+Устройства, не привязанные к политике, продолжат ходить напрямую через WAN — это и есть смысл `xkeen`-style интеграции.
 
 ## Профили
 
@@ -46,6 +56,17 @@ mkeen profile rm work
 ```
 
 Каждый профиль — папка `/opt/etc/mkeen/profiles/<name>/` с `mieru.json` и `singbox.json`. Активный — symlink `/opt/etc/mkeen/active`.
+
+## NDMS Policy
+
+```sh
+mkeen ndms detect [name]   # найти mark по имени политики (default: Mierukeen)
+mkeen ndms bind <mark>     # задать вручную (если автодетект не сработал)
+mkeen ndms unbind          # отвязать (mkeen перестанет перехватывать)
+mkeen ndms status          # текущая привязка
+```
+
+Имя политики хранится в `/opt/etc/mkeen/policy_name`, mark — в `/opt/etc/mkeen/policy_mark`. После любой смены — `mkeen -restart`.
 
 ## Маршруты
 
@@ -79,22 +100,29 @@ mkeen route reload                 # = mkeen -restart
 ## Что под капотом
 
 ```
-client (LAN) -> Keenetic -[iptables mangle TPROXY]-> sing-box :7895
-                                                     |
-                                            (route rules)
-                                                     |
-                                        +------------+----------+
-                                        v            v          v
-                                  mieru (SOCKS5)   direct      block
-                                     :1080
-                                        |
-                                        v
-                                  mieru-server
+LAN-client -> Keenetic
+  -> NDMS ставит mark $POLICY_MARK на пакеты устройств в политике Mierukeen
+  -> mangle PREROUTING -m connmark --mark $POLICY_MARK -j MIERUKEEN
+  -> MIERUKEEN: bypass private nets + TPROXY -> sing-box :7895
+                                                       |
+                                              (route rules)
+                                                       |
+                                          +------------+----------+
+                                          v            v          v
+                                    mieru (SOCKS5)   direct     block
+                                       :1080
+                                          |
+                                          v
+                                    mieru-server
 ```
 
-- LAN-трафик заворачивается в `mangle PREROUTING` цепочку `MIERUKEEN`, помечается `fwmark 0x1`, через `ip rule` уходит в локальную табличку `100` и попадает на tproxy-инбаунд sing-box на порту 7895.
+- **NDMS Policy интеграция (xkeen-style):** Keenetic сам ставит на пакеты от устройств в политике fwmark, специфичный для этой политики. `mkeen ndms detect` достаёт mark из локального API `http://localhost:79/rci/show/ip/policy` (то же, что использует web-UI) и сохраняет в `/opt/etc/mkeen/policy_mark`.
+- В `mangle PREROUTING` перехватывается **только** трафик с этим mark — никакие другие LAN-устройства не затрагиваются.
+- В цепочке `MIERUKEEN` приватные сети идут `RETURN`, остальное помечается `fwmark 0x1` и уходит на tproxy-инбаунд sing-box (через `ip rule` + локальная табличка 100).
 - sing-box по правилам решает: RU/приватные сети — direct, реклама — block, всё остальное — в SOCKS5 на mieru.
 - mieru обфусцирует и пробрасывает на сервер.
+
+С xkeen совместимо: можно держать обе политики одновременно (XKeen → xray, Mierukeen → mieru) и переключать устройства между ними мышкой.
 
 ## Структура репозитория
 

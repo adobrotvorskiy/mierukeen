@@ -159,6 +159,62 @@ cmd_route() {
     esac
 }
 
+# ── NDMS Policy ──────────────────────────────────────────────────────
+# Привязка к NDMS-политике Keenetic: Keenetic ставит на пакеты
+# устройств в политике fwmark, специфичный для этой политики.
+# mark достаём из локального REST API (тот же, что использует web-UI).
+cmd_ndms() {
+    sub="$1"; shift
+    policy_name_file="$CONF/policy_name"
+    policy_mark_file="$CONF/policy_mark"
+    default_name="Mierukeen"
+
+    case "$sub" in
+        detect)
+            name="${1:-$(cat "$policy_name_file" 2>/dev/null || echo "$default_name")}"
+            command -v jq >/dev/null 2>&1 || die "нужен jq (opkg install jq)"
+            mark="$(curl -kfsS "http://localhost:79/rci/show/ip/policy" 2>/dev/null \
+                    | jq -r --arg n "$name" '
+                        .[] | select(.description | ascii_downcase == ($n | ascii_downcase)) | .mark
+                      ' | head -1)"
+            [ -n "$mark" ] && [ "$mark" != "null" ] || \
+                die "политика '$name' не найдена в NDMS. Создай её в UI: Сетевые правила → Политики."
+            echo "$name" > "$policy_name_file"
+            echo "$mark"  > "$policy_mark_file"
+            log "политика '$name' найдена, mark=0x$mark — сохранено"
+            log "применить: mkeen -restart"
+            ;;
+        bind)
+            mark="$1"
+            [ -n "$mark" ] || die "usage: mkeen ndms bind <mark-hex>"
+            mark="$(echo "$mark" | sed 's/^0x//' | tr 'A-F' 'a-f')"
+            echo "$mark" > "$policy_mark_file"
+            log "привязан mark=0x$mark"
+            log "применить: mkeen -restart"
+            ;;
+        unbind)
+            rm -f "$policy_mark_file"
+            log "привязка снята (применить: mkeen -restart)"
+            ;;
+        status)
+            name="$(cat "$policy_name_file" 2>/dev/null || echo "<не задано>")"
+            mark="$(cat "$policy_mark_file" 2>/dev/null || echo "<не привязан>")"
+            echo "policy_name: $name"
+            echo "policy_mark: $mark"
+            ;;
+        *)
+            cat <<EOF
+usage:
+  mkeen ndms detect [name]   найти mark политики по имени (default: Mierukeen)
+  mkeen ndms bind <mark>     задать mark вручную (hex, например ffffaab)
+  mkeen ndms unbind          снять привязку
+  mkeen ndms status          показать текущее состояние
+EOF
+            exit 1
+            ;;
+    esac
+}
+
 cmd_update() {
     url="https://gitlab.com/adobrotvorskiy/mierukeen/-/raw/main/scripts/install.sh"
     log "перекачиваю install.sh и перезапускаю"
@@ -173,6 +229,7 @@ case "$1" in
     -log|log)         shift; cmd_log "$@" ;;
     profile)          shift; cmd_profile "$@" ;;
     route)            shift; cmd_route "$@" ;;
+    ndms)             shift; cmd_ndms "$@" ;;
     update)           cmd_update ;;
     ""|-h|--help|help)
         cat <<EOF
@@ -184,6 +241,7 @@ mkeen — mieru + sing-box на Keenetic
   mkeen route add <domain|cidr> <proxy|direct|block>
   mkeen route del <domain|cidr>
   mkeen route list | reload
+  mkeen ndms detect [name] | bind <mark> | unbind | status
   mkeen update
 
 Активный профиль: $(active_profile)

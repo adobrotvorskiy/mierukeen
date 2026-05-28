@@ -1,6 +1,16 @@
 #!/bin/sh
-# S99mkeen — старт mieru + sing-box и настройка tproxy.
+# S99mkeen — запуск mieru + sing-box, привязка к NDMS Policy.
 # Стиль init-скриптов Entware (start/stop/restart/status/check).
+#
+# Архитектура (xkeen-style):
+#   1) Пользователь создаёт в UI Keenetic политику с именем
+#      $(cat $CONF/policy_name)  (по умолчанию "Mierukeen") и привязывает
+#      к ней устройства (Mои сети → закрепить за политикой).
+#   2) NDMS вешает на пакеты от этих устройств fwmark, специфичный
+#      для политики (видно через GET http://localhost:79/rci/show/ip/policy).
+#   3) Mark сохраняется в $CONF/policy_mark (через `mkeen ndms detect`).
+#   4) Этот init перехватывает в mangle PREROUTING только пакеты с
+#      этим mark и заворачивает их в TPROXY на локальный sing-box.
 
 PREFIX="/opt"
 CONF="$PREFIX/etc/mkeen"
@@ -15,15 +25,13 @@ MIERU_CONF="$ACTIVE/mieru.json"
 SINGBOX_CONF="$ACTIVE/singbox.json"
 
 PID_SINGBOX="$RUN/sing-box.pid"
-# mieru сам управляет своим жизненным циклом (mieru start/stop/status),
-# конфиг применяется один раз через `mieru apply config`. PID не трекаем.
-
 LOG_MIERU="$LOG/mieru.log"
 LOG_SINGBOX="$LOG/sing-box.log"
 
-FWMARK="0x1"
+FWMARK="0x1"          # наш tproxy mark (для ip rule → loopback)
 RT_TABLE="100"
 CHAIN="MIERUKEEN"
+POLICY_MARK_FILE="$CONF/policy_mark"
 
 read_tproxy_port() {
     p="$(grep -oE '"listen_port"[[:space:]]*:[[:space:]]*[0-9]+' "$SINGBOX_CONF" 2>/dev/null \
@@ -31,48 +39,58 @@ read_tproxy_port() {
     echo "${p:-7895}"
 }
 
+read_policy_mark() {
+    m="$(cat "$POLICY_MARK_FILE" 2>/dev/null | tr -d '[:space:]')"
+    case "$m" in 0x*) echo "$m" ;; "") echo "" ;; *) echo "0x$m" ;; esac
+}
+
 mkdir -p "$RUN" "$LOG"
 
-# ── helpers ──────────────────────────────────────────────────────────
 is_running() {
     pid="$1"
     [ -f "$pid" ] && kill -0 "$(cat "$pid")" 2>/dev/null
 }
 
-# ── tproxy: ip rule/route + iptables mangle ──────────────────────────
+# ── tproxy: ip rule + iptables mangle, привязка по NDMS policy mark ──
 tproxy_up() {
     tport="$(read_tproxy_port)"
-    ip rule add fwmark "$FWMARK" lookup "$RT_TABLE" 2>/dev/null || true
+    pmark="$(read_policy_mark)"
+    if [ -z "$pmark" ]; then
+        echo "[mkeen] WARN: policy_mark не задан — устройства не будут попадать в прокси."
+        echo "[mkeen]       создай политику в UI Keenetic и выполни: mkeen ndms detect"
+        return 0
+    fi
+
+    ip rule add fwmark "$FWMARK" lookup "$RT_TABLE" pref 110 2>/dev/null || true
     ip route add local default dev lo table "$RT_TABLE" 2>/dev/null || true
 
     iptables -t mangle -N "$CHAIN" 2>/dev/null || iptables -t mangle -F "$CHAIN"
-    # bypass служебных и приватных сетей
     for n in 0.0.0.0/8 127.0.0.0/8 10.0.0.0/8 169.254.0.0/16 \
              172.16.0.0/12 192.168.0.0/16 224.0.0.0/4 240.0.0.0/4 \
              255.255.255.255/32; do
         iptables -t mangle -A "$CHAIN" -d "$n" -j RETURN
     done
-    # сам трафик роутера — мимо (избегаем петель)
-    iptables -t mangle -A "$CHAIN" -m owner --uid-owner 0 -j RETURN 2>/dev/null || true
-    # маркируем и в tproxy
     iptables -t mangle -A "$CHAIN" -p tcp -j TPROXY \
         --on-port "$tport" --tproxy-mark "$FWMARK"
     iptables -t mangle -A "$CHAIN" -p udp -j TPROXY \
         --on-port "$tport" --tproxy-mark "$FWMARK"
-    # вешаем на PREROUTING (форвард-трафик от клиентов LAN)
-    iptables -t mangle -C PREROUTING -j "$CHAIN" 2>/dev/null || \
-        iptables -t mangle -A PREROUTING -j "$CHAIN"
+
+    iptables -t mangle -C PREROUTING -m connmark --mark "$pmark" -j "$CHAIN" 2>/dev/null || \
+        iptables -t mangle -A PREROUTING -m connmark --mark "$pmark" -j "$CHAIN"
+
+    echo "[mkeen] tproxy:$tport hooked on NDMS policy mark $pmark"
 }
 
 tproxy_down() {
-    iptables -t mangle -D PREROUTING -j "$CHAIN" 2>/dev/null || true
+    pmark="$(read_policy_mark)"
+    [ -n "$pmark" ] && \
+        iptables -t mangle -D PREROUTING -m connmark --mark "$pmark" -j "$CHAIN" 2>/dev/null || true
     iptables -t mangle -F "$CHAIN" 2>/dev/null || true
     iptables -t mangle -X "$CHAIN" 2>/dev/null || true
-    ip rule del fwmark "$FWMARK" lookup "$RT_TABLE" 2>/dev/null || true
+    ip rule del fwmark "$FWMARK" lookup "$RT_TABLE" pref 110 2>/dev/null || true
     ip route flush table "$RT_TABLE" 2>/dev/null || true
 }
 
-# ── start / stop ─────────────────────────────────────────────────────
 do_start() {
     [ -d "$ACTIVE" ] || ln -sfn "$CONF/profiles/default" "$ACTIVE"
     [ -x "$MIERU_BIN" ]   || { echo "нет $MIERU_BIN"; exit 1; }
@@ -94,7 +112,6 @@ do_start() {
         sleep 1
     fi
 
-    echo "[mkeen] setup tproxy (mark $FWMARK)"
     tproxy_up
     echo "[mkeen] started"
 }
@@ -122,10 +139,12 @@ do_status() {
     else
         echo "sing-box: stopped"
     fi
+    echo "── tproxy ──"
     if iptables -t mangle -L "$CHAIN" -n >/dev/null 2>&1; then
-        echo "tproxy: up (chain $CHAIN, port $(read_tproxy_port))"
+        pmark="$(read_policy_mark)"
+        echo "chain $CHAIN: up (port $(read_tproxy_port), policy mark ${pmark:-<unbound>})"
     else
-        echo "tproxy: down"
+        echo "chain $CHAIN: down"
     fi
 }
 

@@ -111,6 +111,22 @@ done
 [ -L "$PREFIX/etc/mkeen/active" ] || \
     ln -sfn "$PREFIX/etc/mkeen/profiles/default" "$PREFIX/etc/mkeen/active"
 
+# ── авто-привязка к NDMS политике "Mierukeen" (если уже создана) ────
+NDMS_POLICY_NAME="${NDMS_POLICY_NAME:-Mierukeen}"
+echo "$NDMS_POLICY_NAME" > "$PREFIX/etc/mkeen/policy_name"
+POLICY_MARK="$(curl -kfsS "http://localhost:79/rci/show/ip/policy" 2>/dev/null \
+    | jq -r --arg n "$NDMS_POLICY_NAME" \
+        '.[] | select(.description | ascii_downcase == ($n | ascii_downcase)) | .mark' \
+    2>/dev/null | head -1)"
+if [ -n "$POLICY_MARK" ] && [ "$POLICY_MARK" != "null" ]; then
+    echo "$POLICY_MARK" > "$PREFIX/etc/mkeen/policy_mark"
+    log "найдена NDMS политика '$NDMS_POLICY_NAME' (mark=0x$POLICY_MARK) — привязано"
+    BOUND=1
+else
+    log "NDMS политика '$NDMS_POLICY_NAME' не найдена — создай в UI и запусти 'mkeen ndms detect'"
+    BOUND=0
+fi
+
 cat <<EOF
 
 ✓ mierukeen ${VERSION} установлен.
@@ -118,10 +134,23 @@ cat <<EOF
 Дальше:
   1) Отредактируй mieru-профиль: $PREFIX/etc/mkeen/profiles/default/mieru.json
      (REPLACE_ME_* поля — креды и адрес твоего mieru-сервера)
-  2) Старт:        mkeen -start
+EOF
+
+if [ "$BOUND" -eq 0 ]; then
+    cat <<EOF
+  2) В админке Keenetic (Сетевые правила → Политики или Профили доступа)
+     создай политику с именем "${NDMS_POLICY_NAME}". Далее привяжи к ней
+     устройства, которые должны ходить через mieru.
+  3) На роутере: mkeen ndms detect
+EOF
+fi
+
+cat <<EOF
+  $( [ "$BOUND" -eq 1 ] && echo "2" || echo "4" )) Привяжи устройства к политике "${NDMS_POLICY_NAME}" в UI Keenetic.
+  $( [ "$BOUND" -eq 1 ] && echo "3" || echo "5" )) Старт:        mkeen -start
      Статус:       mkeen -status
      Логи:         mkeen -log
-  3) Проверь с LAN-клиента: curl https://ifconfig.me
+  $( [ "$BOUND" -eq 1 ] && echo "4" || echo "6" )) Проверь с привязанного устройства: curl https://ifconfig.me
      (должен показать IP mieru-сервера)
 
 Документация: https://gitlab.com/${PROJECT}
