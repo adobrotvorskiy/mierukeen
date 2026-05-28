@@ -13,6 +13,10 @@ ACTIVE_LINK="$CONF/active"
 SINGBOX_BIN="$PREFIX/sbin/sing-box"
 MIERU_BIN="$PREFIX/sbin/mieru"
 
+# /root read-only на Keenetic — mieru state кладём в /opt
+export HOME="$PREFIX/etc/mkeen/.mieru-state"
+mkdir -p "$HOME"
+
 log()  { echo "[mkeen] $*"; }
 die()  { echo "[mkeen] ERROR: $*" >&2; exit 1; }
 

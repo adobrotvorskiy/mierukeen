@@ -21,6 +21,12 @@ ACTIVE="$CONF/active"
 SINGBOX_BIN="$PREFIX/sbin/sing-box"
 MIERU_BIN="$PREFIX/sbin/mieru"
 
+# /root на Keenetic — read-only. mieru пишет в $HOME/.config/mieru,
+# поэтому HOME-переменную переадресовываем в /opt.
+MIERU_STATE="$PREFIX/etc/mkeen/.mieru-state"
+mkdir -p "$MIERU_STATE"
+export HOME="$MIERU_STATE"
+
 MIERU_CONF="$ACTIVE/mieru.json"
 SINGBOX_CONF="$ACTIVE/singbox.json"
 

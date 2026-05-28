@@ -12,7 +12,7 @@
     ],
     "rules": [
       { "outbound": "any",       "server": "dns-direct" },
-      { "rule_set": "geosite-ru", "server": "dns-direct" }
+      { "rule_set": "geosite-category-ru", "server": "dns-direct" }
     ],
     "final": "dns-proxy",
     "strategy": "ipv4_only",
@@ -38,8 +38,8 @@
   "route": {
     "rule_set": [
       {
-        "type": "remote", "tag": "geosite-ru", "format": "binary",
-        "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-ru.srs",
+        "type": "remote", "tag": "geosite-category-ru", "format": "binary",
+        "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-category-ru.srs",
         "download_detour": "direct",
         "update_interval": "168h"
       },
@@ -60,7 +60,7 @@
       { "protocol": "dns", "outbound": "dns-out" },
       { "ip_is_private": true, "outbound": "direct" },
       { "rule_set": "geosite-category-ads-all", "outbound": "block" },
-      { "rule_set": "geosite-ru", "outbound": "direct" },
+      { "rule_set": "geosite-category-ru", "outbound": "direct" },
       { "rule_set": "geoip-ru",   "outbound": "direct" }
     ],
     "final": "mieru-out",

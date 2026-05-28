@@ -21,5 +21,6 @@
   ],
   "socks5Port": 1080,
   "socks5ListenLAN": false,
+  "rpcPort": 8964,
   "loggingLevel": "INFO"
 }
