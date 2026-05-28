@@ -1,0 +1,122 @@
+name: build & release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*.*.*']
+  workflow_dispatch:
+
+permissions:
+  contents: write   # для создания Releases
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goarch: mipsle
+            gomips: softfloat
+            label:  mipsle-softfloat
+          - goarch: arm64
+            gomips: ""
+            label:  arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+
+      - name: Load pinned versions
+        run: cat build/versions.env >> "$GITHUB_ENV"
+
+      - name: Prepare payload tree
+        run: |
+          mkdir -p out/payload/opt/sbin \
+                   out/payload/opt/etc/init.d \
+                   out/payload/opt/etc/mkeen/profiles/default \
+                   out/payload/opt/etc/ndm/netfilter.d
+          cp opt/sbin/mkeen                              out/payload/opt/sbin/mkeen
+          cp opt/etc/init.d/S99mkeen                     out/payload/opt/etc/init.d/S99mkeen
+          cp opt/etc/ndm/netfilter.d/mierukeen.sh        out/payload/opt/etc/ndm/netfilter.d/mierukeen.sh
+          cp opt/etc/mkeen/profiles/default/mieru.json   out/payload/opt/etc/mkeen/profiles/default/
+          cp opt/etc/mkeen/profiles/default/singbox.json out/payload/opt/etc/mkeen/profiles/default/
+
+      - name: Build mieru
+        env:
+          GOOS:   linux
+          GOARCH: ${{ matrix.goarch }}
+          GOMIPS: ${{ matrix.gomips }}
+          CGO_ENABLED: '0'
+        run: |
+          git clone --depth=1 --branch "v${MIERU_VERSION}" \
+              https://github.com/enfein/mieru.git src/mieru
+          cd src/mieru
+          go build -trimpath \
+              -ldflags="-s -w -X github.com/enfein/mieru/v3/pkg/version.Version=${MIERU_VERSION}" \
+              -o "${GITHUB_WORKSPACE}/out/payload/opt/sbin/mieru" \
+              ./cmd/mieru
+
+      - name: Build sing-box
+        env:
+          GOOS:   linux
+          GOARCH: ${{ matrix.goarch }}
+          GOMIPS: ${{ matrix.gomips }}
+          CGO_ENABLED: '0'
+        run: |
+          git clone --depth=1 --branch "v${SINGBOX_VERSION}" \
+              https://github.com/SagerNet/sing-box.git src/sing-box
+          cd src/sing-box
+          go build -trimpath \
+              -tags "with_quic,with_grpc,with_dhcp,with_wireguard,with_ech,with_utls,with_clash_api" \
+              -ldflags="-s -w -X github.com/sagernet/sing-box/constant.Version=${SINGBOX_VERSION}" \
+              -o "${GITHUB_WORKSPACE}/out/payload/opt/sbin/sing-box" \
+              ./cmd/sing-box
+
+      - name: Package tarball
+        id: pack
+        run: |
+          chmod +x out/payload/opt/sbin/* \
+                   out/payload/opt/etc/init.d/S99mkeen \
+                   out/payload/opt/etc/ndm/netfilter.d/mierukeen.sh
+          VERSION="${GITHUB_REF_NAME#refs/tags/}"
+          case "$VERSION" in v*) ;; *) VERSION="dev-${GITHUB_SHA:0:7}" ;; esac
+          TARBALL="mierukeen-${VERSION}-${{ matrix.label }}.tar.gz"
+          cd out && tar -czf "$TARBALL" payload
+          sha256sum "$TARBALL" > "$TARBALL.sha256"
+          echo "tarball=$TARBALL"             >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION"             >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mierukeen-${{ steps.pack.outputs.version }}-${{ matrix.label }}
+          path: |
+            out/mierukeen-*.tar.gz
+            out/mierukeen-*.sha256
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "mierukeen ${{ github.ref_name }}"
+          body: |
+            mierukeen ${{ github.ref_name }} — mieru + sing-box для Keenetic (Entware).
+
+            Установка / обновление на роутере:
+            ```sh
+            curl -fsSL https://raw.githubusercontent.com/adobrotvorskiy/mierukeen/main/scripts/install.sh | sh
+            ```
+          files: |
+            dist/mierukeen-*.tar.gz
+            dist/mierukeen-*.sha256

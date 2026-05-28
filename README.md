@@ -1,36 +1,38 @@
+[Русская версия →](README.ru.md)
+
 # mierukeen
 
-**mieru + sing-box для роутеров Keenetic с Entware.**
+**mieru + sing-box for Keenetic routers with Entware.**
 
-Дистрибутив в стиле [xkeen](https://github.com/Skrill0/XKeen), но с другим стеком:
-- **[mieru](https://github.com/enfein/mieru)** — обфусцированный SOCKS5-транспорт (клиент)
-- **[sing-box](https://github.com/SagerNet/sing-box)** — routing engine: tproxy на роутере, geoip/geosite, правила по доменам/CIDR, Clash API
-- **`mkeen`** — CLI поверх двух, лайфсайкл + профили + маршруты
+An [xkeen](https://github.com/Skrill0/XKeen)-style distribution but with a different stack:
+- **[mieru](https://github.com/enfein/mieru)** — obfuscated SOCKS5 transport (client)
+- **[sing-box](https://github.com/SagerNet/sing-box)** — routing engine: REDIRECT/TPROXY inbounds, geoip/geosite, domain & CIDR rules, Clash API
+- **`mkeen`** — CLI on top of both: lifecycle + profiles + routes + NDMS policy binding
 
-Целевое железо: **Keenetic Titan (KN-1810)** и любые Keenetic на MT7621 (mipsel softfloat). CI также собирает под arm64 для других моделей.
+Target hardware: **Keenetic Titan (KN-1810)** and any MT7621-based Keenetic (mipsel softfloat). CI also builds an arm64 tarball for other models.
 
-## Установка
+## Install
 
-На роутере (с уже установленной Entware):
+On the router (Entware already installed):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/adobrotvorskiy/mierukeen/main/scripts/install.sh | sh
 ```
 
-**Перед стартом**:
+**Before starting**:
 
-1. В UI Keenetic зайди в **Сетевые правила → Политики** (или **Профили доступа** в новых прошивках) и создай политику с именем `Mierukeen`.
-2. **Обязательно отметь внутри неё хотя бы одно интернет-соединение** (обычно — твой основной провайдер / WAN). Без этого NDMS отвечает `Refused` на DNS-запросы от устройств политики, и они вообще не получают интернета — даже до нашего sing-box не доходят. По факту трафик пойдёт **не** через это соединение благодаря нашим iptables-правилам, но Keenetic так разрешит DNS.
-3. Привяжи к ней устройства, которые должны ходить через mieru (Мои сети и Wi-Fi → конкретное устройство → закрепить за политикой).
-3. Отредактируй mieru-профиль на роутере: `vi /opt/etc/mkeen/profiles/default/mieru.json` — впиши свой mieru-сервер (`REPLACE_ME_*`).
-4. Привяжи mkeen к политике (если установщик не сделал это сам):
+1. In the Keenetic web UI, open **Network rules → Policies** (or **Access profiles** on newer firmware) and create a policy named `Mierukeen`.
+2. **Inside that policy, tick at least one internet connection** (usually your main WAN). Without this, NDMS answers `Refused` to DNS queries from devices in the policy and they never get any internet — sing-box is never reached. Traffic itself will still flow through mieru thanks to our iptables rules; this ticked WAN only makes Keenetic allow DNS.
+3. Attach the devices that should go through mieru to this policy (My Networks & Wi-Fi → device → pin to policy).
+4. Edit the mieru profile on the router: `vi /opt/etc/mkeen/profiles/default/mieru.json` — fill in your mieru server (`REPLACE_ME_*` fields).
+5. Bind mkeen to the policy (the installer tries this automatically):
 
 ```sh
-mkeen ndms detect       # ищет политику Mierukeen, сохраняет её mark
-mkeen ndms status       # показывает текущую привязку
+mkeen ndms detect       # look up the policy named Mierukeen, save its mark
+mkeen ndms status       # show current binding
 ```
 
-5. Запусти:
+6. Start:
 
 ```sh
 mkeen -start
@@ -38,114 +40,118 @@ mkeen -status
 mkeen -log
 ```
 
-Проверка с устройства, привязанного к политике в UI:
+Verify from a device pinned to the policy in the UI:
 
 ```
-curl https://ifconfig.me   # должен быть IP mieru-сервера
+curl https://ifconfig.me   # should print the mieru server's IP
 ```
 
-Устройства, не привязанные к политике, продолжат ходить напрямую через WAN — это и есть смысл `xkeen`-style интеграции.
+Devices **not** in the policy keep using your normal WAN unchanged — that's the point of the `xkeen`-style integration.
 
-## Профили
+## Profiles
 
 ```sh
-mkeen profile list           # с маркером * на активном
-mkeen profile add work       # клон с default
+mkeen profile list           # active one is marked with *
+mkeen profile add work       # cloned from default
 mkeen profile use work
-mkeen profile show           # текущий конфиг
+mkeen profile show           # current config
 mkeen profile rm work
 ```
 
-Каждый профиль — папка `/opt/etc/mkeen/profiles/<name>/` с `mieru.json` и `singbox.json`. Активный — symlink `/opt/etc/mkeen/active`.
+Each profile is a directory under `/opt/etc/mkeen/profiles/<name>/` containing `mieru.json` and `singbox.json`. The active one is a symlink `/opt/etc/mkeen/active`.
 
-## NDMS Policy
+## NDMS policy
 
 ```sh
-mkeen ndms detect [name]   # найти mark по имени политики (default: Mierukeen)
-mkeen ndms bind <mark>     # задать вручную (если автодетект не сработал)
-mkeen ndms unbind          # отвязать (mkeen перестанет перехватывать)
-mkeen ndms status          # текущая привязка
+mkeen ndms detect [name]   # resolve mark by policy name (default: Mierukeen)
+mkeen ndms bind <mark>     # set manually if auto-detect didn't work
+mkeen ndms unbind          # unhook (mkeen stops intercepting)
+mkeen ndms status          # current binding
 ```
 
-Имя политики хранится в `/opt/etc/mkeen/policy_name`, mark — в `/opt/etc/mkeen/policy_mark`. После любой смены — `mkeen -restart`.
+The policy name is stored in `/opt/etc/mkeen/policy_name`, the mark in `/opt/etc/mkeen/policy_mark`. After any change — `mkeen -restart`.
 
-## Маршруты
+## Routes
 
 ```sh
-mkeen route add youtube.com       proxy   # домен -> mieru
-mkeen route add 1.2.3.0/24        direct  # подсеть -> напрямую
-mkeen route add ads.example.com   block   # -> выкинуть
+mkeen route add youtube.com       proxy   # domain -> mieru
+mkeen route add 1.2.3.0/24        direct  # subnet -> direct
+mkeen route add ads.example.com   block   # -> dropped
 
 mkeen route list
 mkeen route del youtube.com
-mkeen route reload                 # = mkeen -restart
+mkeen route reload                         # = mkeen -restart
 ```
 
-Правила пишутся прямо в `singbox.json` активного профиля и помечаются `"_mkeen_user": true` — это позволяет их потом удалять. По умолчанию приклеиваются в начало `route.rules` (имеют приоритет над `geoip-ru`/`geosite-ru`).
+Rules are written straight into the active profile's `singbox.json` and tagged with `"_mkeen_user": true` so they can be removed later. They are prepended to `route.rules`, so they take priority over the bundled `geoip-ru` / `geosite-category-ru` defaults.
 
-Если хочется сложнее — редактируй `singbox.json` руками, формат описан в [sing-box docs](https://sing-box.sagernet.org/configuration/route/).
+For anything more complex, edit `singbox.json` by hand — see the [sing-box docs](https://sing-box.sagernet.org/configuration/route/).
 
-## Удалённое управление через Karing / yacd
+## Remote control via Karing / yacd
 
-В дефолтном `singbox.json` включён Clash API на `127.0.0.1:9090` с секретом `CHANGE_ME_CLASH_SECRET`. Открой его на LAN-интерфейс, поставь свой секрет — и подключайся Karing'ом/yacd'ом как к локальному клиенту. Маршруты переключаются на лету, без правки конфига.
+The default `singbox.json` ships with Clash API enabled on `127.0.0.1:9090` with placeholder secret `CHANGE_ME_CLASH_SECRET`. Expose it on the LAN interface, set your own secret, and point Karing / yacd / metacubexd at it as if it were a local client. Routes can be flipped live without editing configs.
 
 ```json
 "experimental": {
   "clash_api": {
     "external_controller": "192.168.1.1:9090",
-    "secret": "TVOJ_DLINNYJ_SEKRET"
+    "secret": "YOUR_LONG_SECRET"
   }
 }
 ```
 
-## Что под капотом
+## How it works
 
 ```
 LAN-client -> Keenetic
-  -> NDMS ставит mark $POLICY_MARK на пакеты устройств в политике Mierukeen
-  -> mangle PREROUTING -m connmark --mark $POLICY_MARK -j MIERUKEEN
-  -> MIERUKEEN: bypass private nets + TPROXY -> sing-box :7895
+  -> NDMS sets fwmark $POLICY_MARK on packets from devices in policy Mierukeen
+  -> TCP: nat    PREROUTING -m connmark --mark $POLICY_MARK -p tcp -j MIERUKEEN
+                  MIERUKEEN: bypass private nets + REDIRECT --to-ports 7895
+  -> UDP: mangle PREROUTING -m connmark --mark $POLICY_MARK -p udp -j MIERUKEEN
+                  MIERUKEEN: bypass private nets + TPROXY --on-port 7896
                                                        |
-                                              (route rules)
+                                                  sing-box
                                                        |
-                                          +------------+----------+
-                                          v            v          v
-                                    mieru (SOCKS5)   direct     block
-                                       :1080
-                                          |
-                                          v
-                                    mieru-server
+                                            +----------+----------+
+                                            v          v          v
+                                       mieru-out    direct      block
+                                       (SOCKS5
+                                        :1080)
+                                            |
+                                            v
+                                       mieru server
 ```
 
-- **NDMS Policy интеграция (xkeen-style):** Keenetic сам ставит на пакеты от устройств в политике fwmark, специфичный для этой политики. `mkeen ndms detect` достаёт mark из локального API `http://localhost:79/rci/show/ip/policy` (то же, что использует web-UI) и сохраняет в `/opt/etc/mkeen/policy_mark`.
-- В `mangle PREROUTING` перехватывается **только** трафик с этим mark — никакие другие LAN-устройства не затрагиваются.
-- В цепочке `MIERUKEEN` приватные сети идут `RETURN`, остальное помечается `fwmark 0x1` и уходит на tproxy-инбаунд sing-box (через `ip rule` + локальная табличка 100).
-- sing-box по правилам решает: RU/приватные сети — direct, реклама — block, всё остальное — в SOCKS5 на mieru.
-- mieru обфусцирует и пробрасывает на сервер.
+- **NDMS Policy integration (xkeen-style):** Keenetic itself attaches a policy-specific fwmark to packets from devices in the policy. `mkeen ndms detect` pulls the mark from the local NDMS REST API at `http://localhost:79/rci/show/ip/policy` (the same source the web UI uses) and persists it to `/opt/etc/mkeen/policy_mark`.
+- Only traffic with that mark is intercepted — other LAN devices are untouched.
+- TCP path uses `nat REDIRECT` and UDP path uses `mangle TPROXY` on separate ports. The split is deliberate: on Linux 4.9 (Keenetic) TPROXY for TCP doesn't reliably deliver packets to a local listener, so we mirror xkeen's "Mixed_1" pattern.
+- sing-box decides per-rule: RU geoip/geosite → direct, ads → block, everything else → SOCKS5 to mieru.
+- mieru obfuscates the SOCKS traffic and forwards it to your server.
 
-С xkeen совместимо: можно держать обе политики одновременно (XKeen → xray, Mierukeen → mieru) и переключать устройства между ними мышкой.
+Coexists with xkeen: you can keep both policies active in parallel (XKeen → xray, Mierukeen → mieru) and shuffle devices between them from the UI.
 
-## Структура репозитория
+## Repository layout
 
 ```
 opt/
   etc/
-    init.d/S99mkeen            # init для Entware
-    mkeen/profiles/default/    # дефолтный профиль
+    init.d/S99mkeen                # Entware init
+    ndm/netfilter.d/mierukeen.sh   # re-applies iptables after NDMS rebuilds
+    mkeen/profiles/default/        # default profile
       mieru.json
       singbox.json
-  sbin/mkeen                   # CLI
+  sbin/mkeen                       # CLI
 scripts/
-  install.sh                   # установщик
+  install.sh                       # installer
 build/
-  versions.env                 # пиннинг mieru/sing-box версий
-.github/workflows/release.yml  # кросс-сборка -> GitHub Release
+  versions.env                     # pinned mieru / sing-box versions
+.github/workflows/release.yml      # cross-build -> GitHub Release
 ```
 
-## Релизы
+## Releases
 
-GitHub Actions собирает на каждый тег `vX.Y.Z` два архива: `mierukeen-vX.Y.Z-mipsle-softfloat.tar.gz` и `...-arm64.tar.gz`. Они публикуются как [GitHub Releases](https://github.com/adobrotvorskiy/mierukeen/releases) и тянутся `install.sh` через `releases/download/vX.Y.Z/...`.
+GitHub Actions cross-builds for every `vX.Y.Z` tag and publishes two assets per release: `mierukeen-vX.Y.Z-mipsle-softfloat.tar.gz` and `…-arm64.tar.gz`. They are reachable at [GitHub Releases](https://github.com/adobrotvorskiy/mierukeen/releases) and pulled by `install.sh` via `releases/download/vX.Y.Z/…`.
 
-## Лицензия
+## License
 
-MIT (исходники mierukeen). Бинари mieru/sing-box — под их собственными лицензиями.
+MIT (mierukeen sources). The bundled mieru and sing-box binaries are governed by their own licenses.
