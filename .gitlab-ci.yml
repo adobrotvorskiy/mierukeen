@@ -9,6 +9,8 @@ variables:
 .build_template: &build_template
   stage: build
   image: golang:1.23-bookworm
+  tags:
+    - mierukeen-self
   before_script:
     - apt-get update -qq && apt-get install -y --no-install-recommends git ca-certificates tar gzip
     - . build/versions.env
@@ -70,6 +72,8 @@ build:aarch64:
 release:
   stage: release
   image: registry.gitlab.com/gitlab-org/release-cli:latest
+  tags:
+    - mierukeen-self
   rules:
     - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/
   needs:
