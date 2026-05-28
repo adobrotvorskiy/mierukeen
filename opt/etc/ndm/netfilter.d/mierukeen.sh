@@ -12,10 +12,10 @@ pidof sing-box  >/dev/null 2>&1 || exit 0
 # Только если есть привязка к NDMS-политике.
 [ -s /opt/etc/mkeen/policy_mark ] || exit 0
 
-# Если наша цепочка ещё стоит — ничего не делаем.
-iptables -t mangle -nL MIERUKEEN >/dev/null 2>&1 && \
-    iptables -t mangle -C PREROUTING -m connmark \
-        --mark "0x$(cat /opt/etc/mkeen/policy_mark | tr -d '[:space:]')" \
-        -j MIERUKEEN >/dev/null 2>&1 && exit 0
+# Если оба наших hook стоят — ничего не делаем.
+pmark="0x$(cat /opt/etc/mkeen/policy_mark | tr -d '[:space:]')"
+iptables -t mangle -C PREROUTING -m connmark --mark "$pmark" -p udp -j MIERUKEEN >/dev/null 2>&1 \
+ && iptables -t nat    -C PREROUTING -m connmark --mark "$pmark" -p tcp -j MIERUKEEN >/dev/null 2>&1 \
+ && exit 0
 
 /opt/etc/init.d/S99mkeen ipt-refresh >/dev/null 2>&1

@@ -1,16 +1,12 @@
 #!/bin/sh
 # S99mkeen — запуск mieru + sing-box, привязка к NDMS Policy.
-# Стиль init-скриптов Entware (start/stop/restart/status/check).
 #
-# Архитектура (xkeen-style):
-#   1) Пользователь создаёт в UI Keenetic политику с именем
-#      $(cat $CONF/policy_name)  (по умолчанию "Mierukeen") и привязывает
-#      к ней устройства (Mои сети → закрепить за политикой).
-#   2) NDMS вешает на пакеты от этих устройств fwmark, специфичный
-#      для политики (видно через GET http://localhost:79/rci/show/ip/policy).
-#   3) Mark сохраняется в $CONF/policy_mark (через `mkeen ndms detect`).
-#   4) Этот init перехватывает в mangle PREROUTING только пакеты с
-#      этим mark и заворачивает их в TPROXY на локальный sing-box.
+# Архитектура (xkeen-style, "Mixed_1"):
+#   1) NDMS ставит mark $POLICY_MARK на пакеты от устройств в политике.
+#   2) В nat PREROUTING ловим TCP и REDIRECT-им на sing-box (порт 7895).
+#   3) В mangle PREROUTING ловим UDP и TPROXY-им на sing-box (порт 7896).
+#   Раздельная схема нужна потому, что TPROXY для TCP на Linux 4.9
+#   (Keenetic) не доставляет пакеты в локальный сокет.
 
 PREFIX="/opt"
 CONF="$PREFIX/etc/mkeen"
@@ -21,12 +17,6 @@ ACTIVE="$CONF/active"
 SINGBOX_BIN="$PREFIX/sbin/sing-box"
 MIERU_BIN="$PREFIX/sbin/mieru"
 
-# /root на Keenetic — read-only. mieru пишет в $HOME/.config/mieru,
-# поэтому HOME-переменную переадресовываем в /opt.
-MIERU_STATE="$PREFIX/etc/mkeen/.mieru-state"
-mkdir -p "$MIERU_STATE"
-export HOME="$MIERU_STATE"
-
 MIERU_CONF="$ACTIVE/mieru.json"
 SINGBOX_CONF="$ACTIVE/singbox.json"
 
@@ -34,15 +24,34 @@ PID_SINGBOX="$RUN/sing-box.pid"
 LOG_MIERU="$LOG/mieru.log"
 LOG_SINGBOX="$LOG/sing-box.log"
 
-FWMARK="0x1"          # наш tproxy mark (для ip rule → loopback)
+# /root read-only на Keenetic — mieru state кладём в /opt
+MIERU_STATE="$PREFIX/etc/mkeen/.mieru-state"
+mkdir -p "$MIERU_STATE"
+export HOME="$MIERU_STATE"
+
+FWMARK="0x1"
 RT_TABLE="100"
-CHAIN="MIERUKEEN"
+CHAIN_NAT="MIERUKEEN"
+CHAIN_MANGLE="MIERUKEEN"
 POLICY_MARK_FILE="$CONF/policy_mark"
 
-read_tproxy_port() {
-    p="$(grep -oE '"listen_port"[[:space:]]*:[[:space:]]*[0-9]+' "$SINGBOX_CONF" 2>/dev/null \
-         | grep -oE '[0-9]+' | head -1)"
-    echo "${p:-7895}"
+# Порты sing-box: TCP redirect и UDP tproxy.
+TCP_PORT_DEFAULT=7895
+UDP_PORT_DEFAULT=7896
+
+read_singbox_port() {
+    # ищем inbound с указанным tag и возвращаем listen_port
+    tag="$1"; default="$2"
+    p="$(python3 - "$SINGBOX_CONF" "$tag" 2>/dev/null <<'PY'
+import json, sys
+cfg, tag = json.load(open(sys.argv[1])), sys.argv[2]
+for ib in cfg.get('inbounds', []):
+    if ib.get('tag') == tag:
+        print(ib.get('listen_port', ''))
+        break
+PY
+)"
+    echo "${p:-$default}"
 }
 
 read_policy_mark() {
@@ -57,42 +66,58 @@ is_running() {
     [ -f "$pid" ] && kill -0 "$(cat "$pid")" 2>/dev/null
 }
 
-# ── tproxy: ip rule + iptables mangle, привязка по NDMS policy mark ──
-tproxy_up() {
-    tport="$(read_tproxy_port)"
+PRIVATE_NETS="0.0.0.0/8 127.0.0.0/8 10.0.0.0/8 169.254.0.0/16 \
+              172.16.0.0/12 192.168.0.0/16 224.0.0.0/4 240.0.0.0/4 \
+              255.255.255.255/32"
+
+# ── iptables: TCP REDIRECT (nat) + UDP TPROXY (mangle) ───────────────
+ipt_up() {
     pmark="$(read_policy_mark)"
     if [ -z "$pmark" ]; then
-        echo "[mkeen] WARN: policy_mark не задан — устройства не будут попадать в прокси."
-        echo "[mkeen]       создай политику в UI Keenetic и выполни: mkeen ndms detect"
+        echo "[mkeen] WARN: policy_mark не задан — устройства не попадают в прокси."
+        echo "[mkeen]       создай политику в UI Keenetic и: mkeen ndms detect"
         return 0
     fi
+    tcp_port=7895
+    udp_port=7896
 
+    # ── UDP path: mangle + tproxy + ip rule ──
     ip rule add fwmark "$FWMARK" lookup "$RT_TABLE" pref 110 2>/dev/null || true
     ip route add local default dev lo table "$RT_TABLE" 2>/dev/null || true
 
-    iptables -t mangle -N "$CHAIN" 2>/dev/null || iptables -t mangle -F "$CHAIN"
-    for n in 0.0.0.0/8 127.0.0.0/8 10.0.0.0/8 169.254.0.0/16 \
-             172.16.0.0/12 192.168.0.0/16 224.0.0.0/4 240.0.0.0/4 \
-             255.255.255.255/32; do
-        iptables -t mangle -A "$CHAIN" -d "$n" -j RETURN
+    iptables -t mangle -N "$CHAIN_MANGLE" 2>/dev/null || iptables -t mangle -F "$CHAIN_MANGLE"
+    for n in $PRIVATE_NETS; do
+        iptables -t mangle -A "$CHAIN_MANGLE" -d "$n" -j RETURN
     done
-    iptables -t mangle -A "$CHAIN" -p tcp -j TPROXY \
-        --on-port "$tport" --tproxy-mark "$FWMARK"
-    iptables -t mangle -A "$CHAIN" -p udp -j TPROXY \
-        --on-port "$tport" --tproxy-mark "$FWMARK"
+    iptables -t mangle -A "$CHAIN_MANGLE" -p udp -j TPROXY \
+        --on-port "$udp_port" --tproxy-mark "$FWMARK"
 
-    iptables -t mangle -C PREROUTING -m connmark --mark "$pmark" -j "$CHAIN" 2>/dev/null || \
-        iptables -t mangle -A PREROUTING -m connmark --mark "$pmark" -j "$CHAIN"
+    iptables -t mangle -C PREROUTING -m connmark --mark "$pmark" -p udp -j "$CHAIN_MANGLE" 2>/dev/null || \
+        iptables -t mangle -A PREROUTING -m connmark --mark "$pmark" -p udp -j "$CHAIN_MANGLE"
 
-    echo "[mkeen] tproxy:$tport hooked on NDMS policy mark $pmark"
+    # ── TCP path: nat redirect ──
+    iptables -t nat -N "$CHAIN_NAT" 2>/dev/null || iptables -t nat -F "$CHAIN_NAT"
+    for n in $PRIVATE_NETS; do
+        iptables -t nat -A "$CHAIN_NAT" -d "$n" -j RETURN
+    done
+    iptables -t nat -A "$CHAIN_NAT" -p tcp -j REDIRECT --to-ports "$tcp_port"
+
+    iptables -t nat -C PREROUTING -m connmark --mark "$pmark" -p tcp -j "$CHAIN_NAT" 2>/dev/null || \
+        iptables -t nat -A PREROUTING -m connmark --mark "$pmark" -p tcp -j "$CHAIN_NAT"
+
+    echo "[mkeen] tcp -> nat REDIRECT :$tcp_port, udp -> mangle TPROXY :$udp_port, policy mark $pmark"
 }
 
-tproxy_down() {
+ipt_down() {
     pmark="$(read_policy_mark)"
-    [ -n "$pmark" ] && \
-        iptables -t mangle -D PREROUTING -m connmark --mark "$pmark" -j "$CHAIN" 2>/dev/null || true
-    iptables -t mangle -F "$CHAIN" 2>/dev/null || true
-    iptables -t mangle -X "$CHAIN" 2>/dev/null || true
+    if [ -n "$pmark" ]; then
+        iptables -t mangle -D PREROUTING -m connmark --mark "$pmark" -p udp -j "$CHAIN_MANGLE" 2>/dev/null || true
+        iptables -t nat    -D PREROUTING -m connmark --mark "$pmark" -p tcp -j "$CHAIN_NAT"    2>/dev/null || true
+    fi
+    iptables -t mangle -F "$CHAIN_MANGLE" 2>/dev/null || true
+    iptables -t mangle -X "$CHAIN_MANGLE" 2>/dev/null || true
+    iptables -t nat    -F "$CHAIN_NAT"    2>/dev/null || true
+    iptables -t nat    -X "$CHAIN_NAT"    2>/dev/null || true
     ip rule del fwmark "$FWMARK" lookup "$RT_TABLE" pref 110 2>/dev/null || true
     ip route flush table "$RT_TABLE" 2>/dev/null || true
 }
@@ -118,13 +143,13 @@ do_start() {
         sleep 1
     fi
 
-    tproxy_up
+    ipt_up
     echo "[mkeen] started"
 }
 
 do_stop() {
-    echo "[mkeen] teardown tproxy"
-    tproxy_down
+    echo "[mkeen] teardown iptables"
+    ipt_down
     if is_running "$PID_SINGBOX"; then
         kill "$(cat "$PID_SINGBOX")" 2>/dev/null
         sleep 1
@@ -145,13 +170,19 @@ do_status() {
     else
         echo "sing-box: stopped"
     fi
-    echo "── tproxy ──"
-    if iptables -t mangle -L "$CHAIN" -n >/dev/null 2>&1; then
-        pmark="$(read_policy_mark)"
-        echo "chain $CHAIN: up (port $(read_tproxy_port), policy mark ${pmark:-<unbound>})"
+    echo "── iptables ──"
+    pmark="$(read_policy_mark)"
+    if iptables -t mangle -nL "$CHAIN_MANGLE" >/dev/null 2>&1; then
+        echo "mangle $CHAIN_MANGLE: up"
     else
-        echo "chain $CHAIN: down"
+        echo "mangle $CHAIN_MANGLE: down"
     fi
+    if iptables -t nat -nL "$CHAIN_NAT" >/dev/null 2>&1; then
+        echo "nat $CHAIN_NAT: up"
+    else
+        echo "nat $CHAIN_NAT: down"
+    fi
+    echo "policy mark: ${pmark:-<unbound>}"
 }
 
 case "$1" in
@@ -160,8 +191,6 @@ case "$1" in
     restart)     do_stop; do_start ;;
     status)      do_status ;;
     check)       "$MIERU_BIN" status >/dev/null 2>&1 && is_running "$PID_SINGBOX" ;;
-    # Пере-применить iptables/ip rule. Вызывается из netfilter.d hook
-    # когда NDMS пересобирает netfilter (изменения в UI, reload интерфейсов).
-    ipt-refresh) tproxy_down; tproxy_up ;;
+    ipt-refresh) ipt_down; ipt_up ;;
     *)           echo "usage: $0 {start|stop|restart|status|check|ipt-refresh}"; exit 1 ;;
 esac
