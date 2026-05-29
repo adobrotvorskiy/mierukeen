@@ -1,4 +1,4 @@
-[Русская версия →](README.ru.md)
+[Русская версия →](README.ru.md) · [AGENTS.md →](AGENTS.md)
 
 # mierukeen
 
