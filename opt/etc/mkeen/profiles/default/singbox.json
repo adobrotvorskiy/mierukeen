@@ -76,7 +76,7 @@
       { "ip_is_private": true, "outbound": "direct" },
       { "rule_set": "geosite-category-ads-all", "outbound": "block" },
       { "rule_set": "geosite-telegram", "outbound": "mieru-out" },
-      { "domain_suffix": ["max.ru", "one.me"], "outbound": "direct" },
+      { "domain_suffix": ["max.ru", "one.me", "oneme.ru", "tamtam.chat"], "outbound": "direct" },
       { "rule_set": "geosite-category-ru", "outbound": "direct" },
       { "rule_set": "geoip-ru",   "outbound": "direct" }
     ],
