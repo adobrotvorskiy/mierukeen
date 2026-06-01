@@ -63,12 +63,20 @@
         "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-category-ads-all.srs",
         "download_detour": "direct",
         "update_interval": "168h"
+      },
+      {
+        "type": "remote", "tag": "geosite-telegram", "format": "binary",
+        "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-telegram.srs",
+        "download_detour": "direct",
+        "update_interval": "168h"
       }
     ],
     "rules": [
       { "protocol": "dns", "outbound": "dns-out" },
       { "ip_is_private": true, "outbound": "direct" },
       { "rule_set": "geosite-category-ads-all", "outbound": "block" },
+      { "rule_set": "geosite-telegram", "outbound": "mieru-out" },
+      { "domain_suffix": ["max.ru", "one.me"], "outbound": "direct" },
       { "rule_set": "geosite-category-ru", "outbound": "direct" },
       { "rule_set": "geoip-ru",   "outbound": "direct" }
     ],
