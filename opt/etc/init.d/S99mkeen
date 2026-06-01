@@ -1,76 +1,136 @@
 #!/bin/sh
-# S99mkeen — запуск mieru + sing-box, привязка к NDMS Policy.
+# S99mkeen — xkeen-style Mixed_1 интеграция mieru + sing-box.
+# NDMS-политика отбирает устройства, mkeen использует **свой** внутренний
+# mark/таблицу — отдельно от policy mark Keenetic.
 #
-# Архитектура (xkeen-style, "Mixed_1"):
-#   1) NDMS ставит mark $POLICY_MARK на пакеты от устройств в политике.
-#   2) В nat PREROUTING ловим TCP и REDIRECT-им на sing-box (порт 7895).
-#   3) В mangle PREROUTING ловим UDP и TPROXY-им на sing-box (порт 7896).
-#   Раздельная схема нужна потому, что TPROXY для TCP на Linux 4.9
-#   (Keenetic) не доставляет пакеты в локальный сокет.
+# Архитектурные тонкости (не сломать при рефакторинге):
+#
+# 1) TABLE_MARK=0x1ab — НЕ путать с NDMS policy mark (0xffffaaX). У NDMS
+#    свои ip rule с pref 100..103 (lookup policy-table / blackhole).
+#    Если использовать общий fwmark, NDMS уведёт пакеты политики в свою
+#    WAN-таблицу ПРЕЖДЕ нашего rule — WAN-IP роутера утечёт наружу.
+#
+# 2) TABLE_PREF=8 — наше ip rule должно быть раньше любого NDMS-правила
+#    (NDMS стартует с pref 99). pref 8 это гарантирует.
+#
+# 3) copy_policy_bypass_routes — пакеты от устройств в политике должны
+#    видеть LAN/VPN, иначе теряется доступ к роутеру и локальной сети.
+#    Копируем все non-default маршруты из NDMS-таблицы политики в нашу.
+#
+# 4) exclude_list — bypass для WAN IP роутера + CGNAT (100.64/10) +
+#    spec/test-net диапазонов. Без WAN exclude — петля при подключении
+#    к собственному WAN.
+#
+# 5) -m socket --transparent — нужен для reverse-path UDP-пакетов от
+#    sing-box, чтобы они тоже маркировались и улетали в нашу таблицу.
 
+PATH="/opt/bin:/opt/sbin:/sbin:/bin:/usr/sbin:/usr/bin"
 PREFIX="/opt"
 CONF="$PREFIX/etc/mkeen"
 RUN="$PREFIX/var/run"
 LOG="$PREFIX/var/log"
 ACTIVE="$CONF/active"
-
 SINGBOX_BIN="$PREFIX/sbin/sing-box"
 MIERU_BIN="$PREFIX/sbin/mieru"
-
 MIERU_CONF="$ACTIVE/mieru.json"
 SINGBOX_CONF="$ACTIVE/singbox.json"
-
 PID_SINGBOX="$RUN/sing-box.pid"
 LOG_MIERU="$LOG/mieru.log"
 LOG_SINGBOX="$LOG/sing-box.log"
 
-# /root read-only на Keenetic — mieru state кладём в /opt
+# /root на Keenetic — read-only. mieru пишет в $HOME/.config/mieru, поэтому
+# HOME переадресуем в /opt.
 MIERU_STATE="$PREFIX/etc/mkeen/.mieru-state"
-mkdir -p "$MIERU_STATE"
+mkdir -p "$MIERU_STATE" "$RUN" "$LOG"
 export HOME="$MIERU_STATE"
 
-FWMARK="0x1"
-RT_TABLE="100"
-CHAIN_NAT="MIERUKEEN"
-CHAIN_MANGLE="MIERUKEEN"
+CHAIN="MIERUKEEN"
+CHAIN_MASK="MIERUKEEN_MASK"
 POLICY_MARK_FILE="$CONF/policy_mark"
+TABLE_ID="100"
+TABLE_MARK="0x1ab"       # см. (1) выше
+TABLE_PREF="8"           # см. (2) выше
+OLD_TPROXY_MARK="0x1"    # cleanup правил от старых версий (<=v0.3.x)
+TCP_PORT="7895"
+UDP_PORT="7896"
+DNS_PORT="53"
 
-# Порты sing-box: TCP redirect и UDP tproxy.
-TCP_PORT_DEFAULT=7895
-UDP_PORT_DEFAULT=7896
-
-read_singbox_port() {
-    # ищем inbound с указанным tag и возвращаем listen_port
-    tag="$1"; default="$2"
-    p="$(python3 - "$SINGBOX_CONF" "$tag" 2>/dev/null <<'PY'
-import json, sys
-cfg, tag = json.load(open(sys.argv[1])), sys.argv[2]
-for ib in cfg.get('inbounds', []):
-    if ib.get('tag') == tag:
-        print(ib.get('listen_port', ''))
-        break
-PY
-)"
-    echo "${p:-$default}"
-}
+IPV4_EXCLUDE="255.255.255.255/32 0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.0.0.0/24 192.0.2.0/24 192.168.0.0/16 198.18.0.0/15 198.51.100.0/24 203.0.113.0/24 224.0.0.0/4 240.0.0.0/4"
 
 read_policy_mark() {
     m="$(cat "$POLICY_MARK_FILE" 2>/dev/null | tr -d '[:space:]')"
     case "$m" in 0x*) echo "$m" ;; "") echo "" ;; *) echo "0x$m" ;; esac
 }
 
-mkdir -p "$RUN" "$LOG"
-
 is_running() {
     pid="$1"
     [ -f "$pid" ] && kill -0 "$(cat "$pid")" 2>/dev/null
 }
 
-PRIVATE_NETS="0.0.0.0/8 127.0.0.0/8 10.0.0.0/8 169.254.0.0/16 \
-              172.16.0.0/12 192.168.0.0/16 224.0.0.0/4 240.0.0.0/4 \
-              255.255.255.255/32"
+# IP роутера наружу — нужен для исключения из проксирования.
+wan_ipv4() {
+    ip route get 77.88.8.8 2>/dev/null | awk '/src/ {print $NF; exit}' || \
+    ip route get 8.8.8.8  2>/dev/null | awk '/src/ {print $NF; exit}' || \
+    ip route get 1.1.1.1  2>/dev/null | awk '/src/ {print $NF; exit}'
+}
 
-# ── iptables: TCP REDIRECT (nat) + UDP TPROXY (mangle) ───────────────
+exclude_list() {
+    wan="$(wan_ipv4)"
+    [ -n "$wan" ] && printf '%s/32 ' "$wan"
+    printf '%s\n' "$IPV4_EXCLUDE"
+}
+
+# Копируем non-default маршруты из NDMS-таблицы политики в нашу (100),
+# иначе устройства теряют доступ к LAN/VPN-подсетям роутера. (3)
+copy_policy_bypass_routes() {
+    pmark="$1"
+    policy_table="$(ip rule show 2>/dev/null | awk -v policy="$pmark" '
+        $0 ~ "fwmark " policy && /lookup/ && !/blackhole/ { print $NF; exit }
+    ')"
+    [ -z "$policy_table" ] && return 0
+
+    ip route show table all 2>/dev/null | awk -v pt="$policy_table" '
+        $0 ~ " table " pt " " { gsub(" table " pt, ""); print }
+    ' | while read route; do
+        case "$route" in
+            default*) ;;
+            *) ip route add table "$TABLE_ID" $route >/dev/null 2>&1 || true ;;
+        esac
+    done
+}
+
+cleanup_rules() {
+    pmark="$(read_policy_mark)"
+    if [ -n "$pmark" ]; then
+        iptables -t nat    -D PREROUTING -m connmark --mark "$pmark" -m conntrack ! --ctstate INVALID -p tcp -j "$CHAIN" 2>/dev/null || true
+        iptables -t mangle -D PREROUTING -m connmark --mark "$pmark" -m conntrack ! --ctstate INVALID -p udp -j "$CHAIN" 2>/dev/null || true
+        iptables -t mangle -D PREROUTING -m connmark --mark "$pmark" -m conntrack ! --ctstate INVALID -j "$CHAIN" 2>/dev/null || true
+    fi
+    iptables -t mangle -D PREROUTING -m connmark --mark "$TABLE_MARK" -m conntrack ! --ctstate INVALID -j "$CHAIN" 2>/dev/null || true
+    iptables -t mangle -D OUTPUT -p udp -m conntrack ! --ctstate INVALID -j "$CHAIN_MASK" 2>/dev/null || true
+
+    for table in nat mangle; do
+        iptables -t "$table" -F "$CHAIN" 2>/dev/null || true
+        iptables -t "$table" -X "$CHAIN" 2>/dev/null || true
+    done
+    iptables -t mangle -F "$CHAIN_MASK" 2>/dev/null || true
+    iptables -t mangle -X "$CHAIN_MASK" 2>/dev/null || true
+
+    ip rule del fwmark "$TABLE_MARK"      lookup "$TABLE_ID" pref "$TABLE_PREF" 2>/dev/null || true
+    ip rule del fwmark "$TABLE_MARK"      lookup "$TABLE_ID" pref 99            2>/dev/null || true
+    ip rule del fwmark "$OLD_TPROXY_MARK" lookup "$TABLE_ID" pref 110           2>/dev/null || true
+    ip route flush table "$TABLE_ID" 2>/dev/null || true
+    ip route flush cache 2>/dev/null || true
+}
+
+add_exclude_rules() {
+    table="$1"
+    chain="$2"
+    for exclude in $(exclude_list); do
+        iptables -t "$table" -A "$chain" -d "$exclude" -j RETURN >/dev/null 2>&1
+    done
+}
+
 ipt_up() {
     pmark="$(read_policy_mark)"
     if [ -z "$pmark" ]; then
@@ -78,48 +138,39 @@ ipt_up() {
         echo "[mkeen]       создай политику в UI Keenetic и: mkeen ndms detect"
         return 0
     fi
-    tcp_port=7895
-    udp_port=7896
 
-    # ── UDP path: mangle + tproxy + ip rule ──
-    ip rule add fwmark "$FWMARK" lookup "$RT_TABLE" pref 110 2>/dev/null || true
-    ip route add local default dev lo table "$RT_TABLE" 2>/dev/null || true
+    cleanup_rules
 
-    iptables -t mangle -N "$CHAIN_MANGLE" 2>/dev/null || iptables -t mangle -F "$CHAIN_MANGLE"
-    for n in $PRIVATE_NETS; do
-        iptables -t mangle -A "$CHAIN_MANGLE" -d "$n" -j RETURN
-    done
-    iptables -t mangle -A "$CHAIN_MANGLE" -p udp -j TPROXY \
-        --on-port "$udp_port" --tproxy-mark "$FWMARK"
+    ip rule  add fwmark "$TABLE_MARK" lookup "$TABLE_ID" pref "$TABLE_PREF" >/dev/null 2>&1 || true
+    ip route add local default dev lo table "$TABLE_ID" >/dev/null 2>&1 || true
+    copy_policy_bypass_routes "$pmark"
 
-    iptables -t mangle -C PREROUTING -m connmark --mark "$pmark" -p udp -j "$CHAIN_MANGLE" 2>/dev/null || \
-        iptables -t mangle -A PREROUTING -m connmark --mark "$pmark" -p udp -j "$CHAIN_MANGLE"
+    # TCP: nat REDIRECT (TPROXY для TCP на Linux 4.9 не доставляет пакет).
+    iptables -t nat -N "$CHAIN" 2>/dev/null || true
+    add_exclude_rules nat "$CHAIN"
+    iptables -t nat -A "$CHAIN" -p tcp -j REDIRECT --to-ports "$TCP_PORT" >/dev/null 2>&1
 
-    # ── TCP path: nat redirect ──
-    iptables -t nat -N "$CHAIN_NAT" 2>/dev/null || iptables -t nat -F "$CHAIN_NAT"
-    for n in $PRIVATE_NETS; do
-        iptables -t nat -A "$CHAIN_NAT" -d "$n" -j RETURN
-    done
-    iptables -t nat -A "$CHAIN_NAT" -p tcp -j REDIRECT --to-ports "$tcp_port"
+    # UDP: mangle TPROXY на 127.0.0.1:UDP_PORT с нашим internal mark.
+    iptables -t mangle -N "$CHAIN" 2>/dev/null || true
+    add_exclude_rules mangle "$CHAIN"
+    iptables -t mangle -I "$CHAIN" -p udp -m socket --transparent -j MARK --set-mark "$TABLE_MARK" >/dev/null 2>&1
+    iptables -t mangle -A "$CHAIN" -p udp -j TPROXY --on-ip 127.0.0.1 --on-port "$UDP_PORT" --tproxy-mark "$TABLE_MARK" >/dev/null 2>&1
 
-    iptables -t nat -C PREROUTING -m connmark --mark "$pmark" -p tcp -j "$CHAIN_NAT" 2>/dev/null || \
-        iptables -t nat -A PREROUTING -m connmark --mark "$pmark" -p tcp -j "$CHAIN_NAT"
+    iptables -t nat -C PREROUTING -m connmark --mark "$pmark" -m conntrack ! --ctstate INVALID -p tcp -j "$CHAIN" >/dev/null 2>&1 || \
+        iptables -t nat -A PREROUTING -m connmark --mark "$pmark" -m conntrack ! --ctstate INVALID -p tcp -j "$CHAIN" >/dev/null 2>&1
+    iptables -t mangle -C PREROUTING -m connmark --mark "$pmark" -m conntrack ! --ctstate INVALID -p udp -j "$CHAIN" >/dev/null 2>&1 || \
+        iptables -t mangle -A PREROUTING -m connmark --mark "$pmark" -m conntrack ! --ctstate INVALID -p udp -j "$CHAIN" >/dev/null 2>&1
 
-    echo "[mkeen] tcp -> nat REDIRECT :$tcp_port, udp -> mangle TPROXY :$udp_port, policy mark $pmark"
+    # Перехватываем только policy-marked клиентский трафик. Локальный
+    # OUTPUT UDP не маркируем (это бы потребовало отдельного proxy-uid,
+    # как у xkeen — у нас этого нет).
+
+    ip route flush cache 2>/dev/null || true
+    echo "[mkeen] xkeen-style Mixed_1: policy $pmark, mark $TABLE_MARK, table $TABLE_ID, tcp:$TCP_PORT udp:$UDP_PORT"
 }
 
 ipt_down() {
-    pmark="$(read_policy_mark)"
-    if [ -n "$pmark" ]; then
-        iptables -t mangle -D PREROUTING -m connmark --mark "$pmark" -p udp -j "$CHAIN_MANGLE" 2>/dev/null || true
-        iptables -t nat    -D PREROUTING -m connmark --mark "$pmark" -p tcp -j "$CHAIN_NAT"    2>/dev/null || true
-    fi
-    iptables -t mangle -F "$CHAIN_MANGLE" 2>/dev/null || true
-    iptables -t mangle -X "$CHAIN_MANGLE" 2>/dev/null || true
-    iptables -t nat    -F "$CHAIN_NAT"    2>/dev/null || true
-    iptables -t nat    -X "$CHAIN_NAT"    2>/dev/null || true
-    ip rule del fwmark "$FWMARK" lookup "$RT_TABLE" pref 110 2>/dev/null || true
-    ip route flush table "$RT_TABLE" 2>/dev/null || true
+    cleanup_rules
 }
 
 do_start() {
@@ -142,13 +193,12 @@ do_start() {
         echo $! > "$PID_SINGBOX"
         sleep 1
     fi
-
     ipt_up
     echo "[mkeen] started"
 }
 
 do_stop() {
-    echo "[mkeen] teardown iptables"
+    echo "[mkeen] teardown firewall"
     ipt_down
     if is_running "$PID_SINGBOX"; then
         kill "$(cat "$PID_SINGBOX")" 2>/dev/null
@@ -170,19 +220,13 @@ do_status() {
     else
         echo "sing-box: stopped"
     fi
-    echo "── iptables ──"
+    echo "── xkeen-style firewall ──"
     pmark="$(read_policy_mark)"
-    if iptables -t mangle -nL "$CHAIN_MANGLE" >/dev/null 2>&1; then
-        echo "mangle $CHAIN_MANGLE: up"
-    else
-        echo "mangle $CHAIN_MANGLE: down"
-    fi
-    if iptables -t nat -nL "$CHAIN_NAT" >/dev/null 2>&1; then
-        echo "nat $CHAIN_NAT: up"
-    else
-        echo "nat $CHAIN_NAT: down"
-    fi
-    echo "policy mark: ${pmark:-<unbound>}"
+    iptables -t nat    -nL "$CHAIN" >/dev/null 2>&1 && echo "nat $CHAIN: up"    || echo "nat $CHAIN: down"
+    iptables -t mangle -nL "$CHAIN" >/dev/null 2>&1 && echo "mangle $CHAIN: up" || echo "mangle $CHAIN: down"
+    ip rule show 2>/dev/null | grep -q "fwmark $TABLE_MARK.*lookup $TABLE_ID" && echo "policy route: up" || echo "policy route: down"
+    echo "policy mark:   ${pmark:-<unbound>}"
+    echo "internal mark: $TABLE_MARK (table $TABLE_ID, pref $TABLE_PREF)"
 }
 
 case "$1" in
