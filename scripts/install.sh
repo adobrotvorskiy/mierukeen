@@ -115,6 +115,13 @@ done
 [ -L "$PREFIX/etc/mkeen/active" ] || \
     ln -sfn "$PREFIX/etc/mkeen/profiles/default" "$PREFIX/etc/mkeen/active"
 
+# ── cron-watchdog: каждую минуту проверяет демонов, поднимает если лежат
+WATCHDOG_LINE="* * * * * /opt/etc/init.d/S99mkeen check >/dev/null 2>&1 || /opt/etc/init.d/S99mkeen start >/dev/null 2>&1 # mierukeen-watchdog"
+if ! crontab -l 2>/dev/null | grep -q 'mierukeen-watchdog'; then
+    ( crontab -l 2>/dev/null; echo "$WATCHDOG_LINE" ) | crontab -
+    log "установлен cron-watchdog (каждую минуту)"
+fi
+
 # ── авто-привязка к NDMS политике "Mierukeen" (если уже создана) ────
 NDMS_POLICY_NAME="${NDMS_POLICY_NAME:-Mierukeen}"
 echo "$NDMS_POLICY_NAME" > "$PREFIX/etc/mkeen/policy_name"
