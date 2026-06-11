@@ -170,6 +170,16 @@ ipt_up() {
     iptables -t mangle -I "$CHAIN" -p udp -m socket --transparent -j MARK --set-mark "$TABLE_MARK" >/dev/null 2>&1
     iptables -t mangle -A "$CHAIN" -p udp -j TPROXY --on-ip 127.0.0.1 --on-port "$UDP_PORT" --tproxy-mark "$TABLE_MARK" >/dev/null 2>&1
 
+    # QUIC kill-switch. На ядре Keenetic 4.9 модули xt_TPROXY/xt_socket
+    # НЕ подгружаются (iptables не делает modprobe), поэтому правило TPROXY
+    # выше молча падает в /dev/null — и весь UDP/443 (QUIC) утекал бы мимо
+    # тоннеля прямо в WAN (нашли на живом роутере: conntrack [FASTNAT] на
+    # WAN-IP, в логе sing-box ни одного udp-in). Глушим QUIC, чтобы клиенты
+    # политики (Android TV / NVIDIA Shield и т.п.) откатывались на TCP,
+    # который уходит в REDIRECT → sing-box → mieru. RETURN-исключения выше
+    # уже отсекли LAN/private, так что дропаем только публичный QUIC.
+    iptables -t mangle -A "$CHAIN" -p udp --dport 443 -j DROP >/dev/null 2>&1
+
     iptables -t nat -C PREROUTING -m connmark --mark "$pmark" -m conntrack ! --ctstate INVALID -p tcp -j "$CHAIN" >/dev/null 2>&1 || \
         iptables -t nat -A PREROUTING -m connmark --mark "$pmark" -m conntrack ! --ctstate INVALID -p tcp -j "$CHAIN" >/dev/null 2>&1
     iptables -t mangle -C PREROUTING -m connmark --mark "$pmark" -m conntrack ! --ctstate INVALID -p udp -j "$CHAIN" >/dev/null 2>&1 || \

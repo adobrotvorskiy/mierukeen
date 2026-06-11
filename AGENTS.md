@@ -125,6 +125,17 @@ and the GitHub token live in the project owner's `.env.personal`.
   works around this with "Mixed_1": TCP through `nat REDIRECT`, UDP
   through `mangle TPROXY`. We do the same. Don't try to "simplify" back
   to pure TPROXY — it will break on real hardware.
+- **UDP TPROXY is silently inert on the live router too.** `xt_TPROXY`
+  and `xt_socket` ship as `.ko` under `/lib/modules/4.9-ndm-5/` but are
+  **not auto-loaded**, and iptables doesn't modprobe them — so the
+  `mangle TPROXY` rule in `ipt_up` fails quietly (`>/dev/null 2>&1`) and
+  UDP/443 (QUIC) leaks straight out the WAN. Symptom: a policy device
+  (e.g. an NVIDIA Shield) has working TCP but "nothing loads" in QUIC-heavy
+  apps. Diagnosed via `/proc/net/nf_conntrack` showing `[FASTNAT]` UDP
+  flows egressing the WAN-IP. Fix shipped: force-block QUIC (`DROP`
+  udp/443 in the MIERUKEEN chain) so clients fall back to TCP. To truly
+  tunnel UDP instead, `modprobe xt_TPROXY xt_socket` in `ipt_up` before
+  the TPROXY rule — but QUIC-over-mieru(TCP) is flaky, so block wins.
 - An NDMS Policy with **no internet connection ticked** causes NDMS to
   reply `Refused` to DNS for devices in that policy. README + installer
   both warn about this; don't drop the warning.
