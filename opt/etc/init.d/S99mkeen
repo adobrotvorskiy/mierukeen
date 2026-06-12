@@ -275,7 +275,18 @@ case "$1" in
     stop)        do_stop ;;
     restart)     do_stop; do_start ;;
     status)      do_status ;;
-    check)       "$MIERU_BIN" status >/dev/null 2>&1 && is_running "$PID_SINGBOX" ;;
+    check)
+        # Liveness, НЕ RPC-health. Раньше тут был `mieru status` (RPC к
+        # демону): кратковременный таймаут RPC давал ложный fail → cron
+        # дёргал `start` → do_start безусловно передёргивал mieru → следующий
+        # check ловил socks-листенер в переходе → каскад рестартов на минуты
+        # (многоминутные провалы у всех клиентов политики). Теперь проверяем
+        # только живость: демон mieru жив + socks :1080 реально слушает +
+        # sing-box жив. Кратковременный блип RPC больше не роняет watchdog.
+        pidof mieru >/dev/null 2>&1 \
+            && netstat -ln 2>/dev/null | grep -q '127.0.0.1:1080' \
+            && pidof sing-box >/dev/null 2>&1
+        ;;
     ipt-refresh) ipt_down; ipt_up ;;
     *)           echo "usage: $0 {start|stop|restart|status|check|ipt-refresh}"; exit 1 ;;
 esac
