@@ -27,7 +27,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.23'
+          go-version: '1.24'   # sing-box 1.13.x requires go >= 1.24.7
 
       - name: Load pinned versions
         run: grep -E '^[A-Z_]+=' build/versions.env >> "$GITHUB_ENV"
