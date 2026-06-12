@@ -2,8 +2,7 @@ name: build & release
 
 on:
   push:
-    branches: [main]
-    tags: ['v*.*.*']
+    tags: ['v*.*.*']   # build+release only on version tags (no double run on main pushes)
   workflow_dispatch:
 
 permissions:
@@ -70,7 +69,7 @@ jobs:
               https://github.com/SagerNet/sing-box.git src/sing-box
           cd src/sing-box
           go build -trimpath \
-              -tags "with_quic,with_grpc,with_dhcp,with_wireguard,with_ech,with_utls,with_clash_api" \
+              -tags "with_quic,with_grpc,with_dhcp,with_wireguard,with_utls,with_clash_api" \
               -ldflags="-s -w -X github.com/sagernet/sing-box/constant.Version=${SINGBOX_VERSION}" \
               -o "${GITHUB_WORKSPACE}/out/payload/opt/sbin/sing-box" \
               ./cmd/sing-box
