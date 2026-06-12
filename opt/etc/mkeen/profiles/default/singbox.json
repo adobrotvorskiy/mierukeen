@@ -6,45 +6,37 @@
   },
   "dns": {
     "servers": [
-      { "tag": "dns-proxy",  "address": "tls://1.1.1.1",     "detour": "mieru-out" },
-      { "tag": "dns-direct", "address": "https://77.88.8.8/dns-query", "detour": "direct" },
-      { "tag": "dns-block",  "address": "rcode://success" }
+      { "type": "tcp", "tag": "dns-proxy",  "server": "1.1.1.1",     "detour": "mieru-out" },
+      { "type": "udp", "tag": "dns-direct", "server": "192.168.1.1" }
     ],
     "rules": [
-      { "outbound": "any",       "server": "dns-direct" },
       { "rule_set": "geosite-category-ru", "server": "dns-direct" }
     ],
     "final": "dns-proxy",
-    "strategy": "ipv4_only",
-    "independent_cache": true
+    "strategy": "ipv4_only"
   },
   "inbounds": [
     {
       "type": "redirect",
       "tag": "tcp-in",
       "listen": "::",
-      "listen_port": 7895,
-      "sniff": true,
-      "sniff_override_destination": true
+      "listen_port": 7895
     },
     {
       "type": "tproxy",
       "tag": "udp-in",
       "listen": "::",
       "listen_port": 7896,
-      "sniff": true,
-      "sniff_override_destination": true,
       "network": "udp",
       "udp_timeout": "5m"
     }
   ],
   "outbounds": [
     { "type": "socks", "tag": "mieru-out", "server": "127.0.0.1", "server_port": 1080, "version": "5" },
-    { "type": "direct", "tag": "direct" },
-    { "type": "block",  "tag": "block" },
-    { "type": "dns",    "tag": "dns-out" }
+    { "type": "direct", "tag": "direct" }
   ],
   "route": {
+    "default_domain_resolver": { "server": "dns-direct" },
     "rule_set": [
       {
         "type": "remote", "tag": "geosite-category-ru", "format": "binary",
@@ -72,9 +64,10 @@
       }
     ],
     "rules": [
-      { "protocol": "dns", "outbound": "dns-out" },
+      { "action": "sniff" },
+      { "protocol": "dns", "action": "hijack-dns" },
       { "ip_is_private": true, "outbound": "direct" },
-      { "rule_set": "geosite-category-ads-all", "outbound": "block" },
+      { "rule_set": "geosite-category-ads-all", "action": "reject" },
       { "rule_set": "geosite-telegram", "outbound": "mieru-out" },
       {
         "ip_cidr": [

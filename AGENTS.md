@@ -139,6 +139,18 @@ and the GitHub token live in the project owner's `.env.personal`.
 - An NDMS Policy with **no internet connection ticked** causes NDMS to
   reply `Refused` to DNS for devices in that policy. README + installer
   both warn about this; don't drop the warning.
+- **singbox.json is the 1.12+ DNS format** (since v0.5.0 / sing-box
+  1.13.x). DNS servers use `{ "type": "tcp|udp|tls|https", "server": ...,
+  "detour": ... }` — NOT the legacy `"address": "tls://1.1.1.1"` string;
+  `route.default_domain_resolver` is required; sniffing and DNS-hijack are
+  route-rule actions (`{"action":"sniff"}`, `{"protocol":"dns","action":
+  "hijack-dns"}`), not inbound `sniff` fields; ad-block is `{"action":
+  "reject"}`, not a `block` outbound. **Gotcha (hit on the VM):** a DNS
+  server with `"detour":"direct"` is a runtime FATAL on 1.13 ("empty
+  direct outbound") — leave the direct resolver detour-less and let the
+  route rules carry it direct. Always validate a config edit with
+  `sing-box check -c` on a real 1.13 binary before shipping; bumping
+  SINGBOX_VERSION past 1.10 without migrating this file will FATAL on boot.
 
 ## Out of scope for agents
 
