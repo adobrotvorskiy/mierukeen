@@ -13,6 +13,16 @@ ACTIVE_LINK="$CONF/active"
 SINGBOX_BIN="$PREFIX/sbin/sing-box"
 MIERU_BIN="$PREFIX/sbin/mieru"
 
+# upstream sing-box: SagerNet публикует готовый linux-mipsle-softfloat,
+# годный для Keenetic → обновление sing-box не требует нашей CI-сборки.
+# mieru здесь НЕ обновляется (upstream mipsle для него не выпускает —
+# mieru идёт через релиз репы mierukeen).
+SINGBOX_UPSTREAM="SagerNet/sing-box"
+
+# cron-watchdog (строка ровно как в scripts/install.sh)
+WD_MARKER="mierukeen-watchdog"
+WD_LINE="* * * * * /opt/etc/init.d/S99mkeen check >/dev/null 2>&1 || /opt/etc/init.d/S99mkeen start >/dev/null 2>&1 # mierukeen-watchdog"
+
 # /root read-only на Keenetic — mieru state кладём в /opt
 export HOME="$PREFIX/etc/mkeen/.mieru-state"
 mkdir -p "$HOME"
@@ -225,6 +235,97 @@ cmd_update() {
     curl -fsSL "$url" | sh -s -- --upgrade
 }
 
+# ── watchdog on/off ──────────────────────────────────────────────────
+# Приостановить/вернуть cron-watchdog на время правок, чтобы он не звал
+# start параллельно с рестартом (гонка каскадных рестартов).
+wd_off() {
+    crontab -l 2>/dev/null | grep -q "$WD_MARKER" || return 0
+    crontab -l 2>/dev/null | grep -v "$WD_MARKER" | crontab -
+    log "watchdog приостановлен"
+}
+wd_on() {
+    crontab -l 2>/dev/null | grep -q "$WD_MARKER" && return 0
+    ( crontab -l 2>/dev/null; echo "$WD_LINE" ) | crontab -
+    log "watchdog возвращён"
+}
+
+# ── update-singbox ───────────────────────────────────────────────────
+# Обновляет ТОЛЬКО бинарь sing-box напрямую с релизов SagerNet (без CI
+# репы). Безопасно: два вората ДО подмены (бинарь стартует + sing-box
+# check на текущем конфиге), затем watchdog off → бэкап → своп → рестарт
+# → verify → авто-откат при неудаче → watchdog on. mieru не трогается.
+#   mkeen update-singbox            # последняя версия
+#   mkeen update-singbox 1.13.14    # конкретная версия
+cmd_update_singbox() {
+    command -v curl >/dev/null 2>&1 || die "нужен curl"
+    command -v tar  >/dev/null 2>&1 || die "нужен tar"
+
+    case "$(uname -m)" in
+        mips|mipsel) sbarch="linux-mipsle-softfloat" ;;
+        aarch64)     sbarch="linux-arm64" ;;
+        armv7l)      sbarch="linux-armv7" ;;
+        *)           die "не поддерживаемая архитектура: $(uname -m)" ;;
+    esac
+
+    ver="${1#v}"
+    if [ -z "$ver" ]; then
+        log "ищу последний релиз sing-box"
+        ver="$(curl -fsSL "https://api.github.com/repos/$SINGBOX_UPSTREAM/releases/latest" \
+            | tr ',' '\n' | grep -m1 '"tag_name"' \
+            | sed -E 's/.*"v?([0-9.]+)".*/\1/')"
+        [ -n "$ver" ] || die "не узнал последнюю версию — задай явно: mkeen update-singbox X.Y.Z"
+    fi
+    cur="$("$SINGBOX_BIN" version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+    log "sing-box: ${cur:-?} -> $ver ($sbarch)"
+    [ "$cur" = "$ver" ] && { log "уже $ver — нечего делать"; return 0; }
+
+    tmp="$(mktemp -d "${TMPDIR:-/tmp}/mkeen-sb.XXXXXX")" || die "mktemp не сработал"
+    tb="sing-box-${ver}-${sbarch}.tar.gz"
+    url="https://github.com/$SINGBOX_UPSTREAM/releases/download/v${ver}/${tb}"
+
+    # качаем через тоннель (socks 1080) — GitHub-CDN из РФ капризен; если
+    # sock недоступен, фолбэк на прямой WAN.
+    log "качаю $tb"
+    if ! curl -fL --connect-timeout 8 --socks5-hostname 127.0.0.1:1080 "$url" -o "$tmp/$tb" 2>/dev/null; then
+        log "через socks не вышло — пробую напрямую"
+        curl -fL "$url" -o "$tmp/$tb" || { rm -rf "$tmp"; die "не скачался $tb"; }
+    fi
+    tar -xzf "$tmp/$tb" -C "$tmp" || { rm -rf "$tmp"; die "распаковка не удалась"; }
+    new="$(find "$tmp" -name sing-box -type f 2>/dev/null | head -1)"
+    [ -n "$new" ] && [ -f "$new" ] || { rm -rf "$tmp"; die "sing-box не найден в архиве"; }
+    chmod +x "$new"
+
+    # ── ВОРОТА (до любых изменений на боевом) ──
+    "$new" version >/dev/null 2>&1 || { rm -rf "$tmp"; die "новый бинарь не запускается (арх/float mismatch)"; }
+    cfg="$ACTIVE_LINK/singbox.json"
+    if ! "$new" check -c "$cfg" 2>"$tmp/checkerr"; then
+        sed 's/^/[check] /' "$tmp/checkerr" >&2
+        rm -rf "$tmp"
+        die "новый sing-box отверг $cfg — нужна миграция конфига. Апдейт отменён, боевое не тронуто."
+    fi
+
+    # ── деплой с откатом ──
+    bak="$SINGBOX_BIN.bak-${cur:-unknown}"
+    wd_off
+    cp "$SINGBOX_BIN" "$bak" || { wd_on; rm -rf "$tmp"; die "бэкап не создался — прерываю"; }
+    log "бэкап: $bak"
+    cp "$new" "$SINGBOX_BIN" && chmod +x "$SINGBOX_BIN"
+    rm -rf "$tmp"
+    log "рестарт mkeen"
+    "$INIT" restart >/dev/null 2>&1
+    sleep 3
+    if pidof sing-box >/dev/null 2>&1 && "$INIT" check >/dev/null 2>&1; then
+        wd_on
+        log "OK: sing-box ${cur:-?} → $ver. Откат при нужде: cp $bak $SINGBOX_BIN && mkeen -restart"
+    else
+        log "FAIL: sing-box не завёлся — откатываюсь на ${cur:-?}"
+        cp "$bak" "$SINGBOX_BIN" && chmod +x "$SINGBOX_BIN"
+        "$INIT" restart >/dev/null 2>&1
+        wd_on
+        die "откат выполнен (sing-box ${cur:-?}). Новый бинарь не поднялся — смотри mkeen -log singbox"
+    fi
+}
+
 case "$1" in
     -start|start)     cmd_start ;;
     -stop|stop)       cmd_stop ;;
@@ -235,6 +336,7 @@ case "$1" in
     route)            shift; cmd_route "$@" ;;
     ndms)             shift; cmd_ndms "$@" ;;
     update)           cmd_update ;;
+    update-singbox|-update-singbox) shift; cmd_update_singbox "$@" ;;
     ""|-h|--help|help)
         cat <<EOF
 mkeen — mieru + sing-box на Keenetic
@@ -246,7 +348,8 @@ mkeen — mieru + sing-box на Keenetic
   mkeen route del <domain|cidr>
   mkeen route list | reload
   mkeen ndms detect [name] | bind <mark> | unbind | status
-  mkeen update
+  mkeen update                    полный апдейт (mieru+sing-box) из релиза репы
+  mkeen update-singbox [X.Y.Z]    быстрый апдейт ТОЛЬКО sing-box с upstream
 
 Активный профиль: $(active_profile)
 Конфиги:          $CONF
