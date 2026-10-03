@@ -1,25 +1,21 @@
 #!/bin/sh
-# Восстанавливает mierukeen после того, как NDMS пересобирает netfilter
-# (происходит при изменении настроек в UI, переподключении WAN/LAN
-# интерфейсов и т.п.). Также страхует случай когда демоны не были
-# подняты при ребуте — пробуем поднять весь стек целиком.
+# NDMS пересобирает таблицы netfilter по одной (изменение настроек в UI,
+# переподключение интерфейсов и т.п.) и после каждой вызывает этот хук с
+# $type и $table. Возвращаем только нашу часть этой таблицы, атомарно и не
+# трогая остальные (S99mkeen ensure). Прежний ipt-refresh на каждый вызов
+# сначала удалял все наши правила, и трафик политики десятки секунд шёл мимо
+# туннеля. Если демоны лежат — поднимаем стек целиком. Подстраховка на случай,
+# когда NDMS меняет таблицу без вызова хука: cron раз в минуту (mierukeen-ensure).
 
 PATH="/opt/bin:/opt/sbin:/sbin:/bin:/usr/sbin:/usr/bin"
 
+[ "$type" = "ip6tables" ] && exit 0
+case "$table" in filter|raw) exit 0 ;; esac
 [ -s /opt/etc/mkeen/policy_mark ] || exit 0
 
-# Если хотя бы один из демонов лежит — поднимаем весь стек заново.
-# Иначе iptables-цепочки и так не могли бы корректно работать.
 if ! pidof mieru >/dev/null 2>&1 || ! pidof sing-box >/dev/null 2>&1; then
     /opt/etc/init.d/S99mkeen start >/dev/null 2>&1
     exit 0
 fi
 
-# Демоны живы — проверяем что все три якоря (nat-chain, mangle-chain,
-# ip rule fwmark 0x1ab → 100) на месте. Если да — выходим.
-iptables -t nat    -nL MIERUKEEN >/dev/null 2>&1 \
- && iptables -t mangle -nL MIERUKEEN >/dev/null 2>&1 \
- && ip rule show 2>/dev/null | grep -q 'fwmark 0x1ab.*lookup 100' \
- && exit 0
-
-/opt/etc/init.d/S99mkeen ipt-refresh >/dev/null 2>&1
+exec /opt/etc/init.d/S99mkeen ensure "$table" ndm

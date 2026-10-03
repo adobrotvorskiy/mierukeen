@@ -119,7 +119,14 @@ and the GitHub token live in the project owner's `.env.personal`.
   → the init script exports `HOME=/opt/etc/mkeen/.mieru-state` first.
 - NDMS rebuilds iptables on every UI change. Without
   `/opt/etc/ndm/netfilter.d/mierukeen.sh`, our chain silently disappears
-  after the next interface flap.
+  after the next interface flap. NDMS calls the hook once per rebuilt
+  table (`$type`, `$table`), sometimes several times in a row. The hook
+  must only re-add what is missing in that table (`S99mkeen ensure`,
+  one `iptables-restore --noflush`). Do not go back to `ipt-refresh`
+  there: delete-then-re-add on every callback made the rules flap for
+  ~40 s and new policy connections leaked out the WAN (found live: Google
+  answered "User location is not supported" to a Gemini session right
+  after an Http::Proxy change in the UI; sing-box logged no inbound for it).
 - **TPROXY for TCP doesn't work on Linux 4.9** (Keenetic kernel) —
   packets are marked but never delivered to the local socket. xkeen
   works around this with "Mixed_1": TCP through `nat REDIRECT`, UDP

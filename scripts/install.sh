@@ -121,6 +121,13 @@ if ! crontab -l 2>/dev/null | grep -q 'mierukeen-watchdog'; then
     ( crontab -l 2>/dev/null; echo "$WATCHDOG_LINE" ) | crontab -
     log "установлен cron-watchdog (каждую минуту)"
 fi
+# ── cron-ensure: раз в минуту досоздаёт наши iptables-правила, если NDMS
+# пересобрал таблицу, не вызвав netfilter.d-хук
+ENSURE_LINE="* * * * * /opt/etc/init.d/S99mkeen ensure \"\" cron >/dev/null 2>&1 # mierukeen-ensure"
+if ! crontab -l 2>/dev/null | grep -q 'mierukeen-ensure'; then
+    ( crontab -l 2>/dev/null; echo "$ENSURE_LINE" ) | crontab -
+    log "установлен cron-ensure (каждую минуту)"
+fi
 
 # ── авто-привязка к NDMS политике "Mierukeen" (если уже создана) ────
 NDMS_POLICY_NAME="${NDMS_POLICY_NAME:-Mierukeen}"

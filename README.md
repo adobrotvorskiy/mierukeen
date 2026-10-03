@@ -134,6 +134,8 @@ LAN-client -> Keenetic
 
 Coexists with xkeen: you can keep both policies active in parallel (XKeen → xray, Mierukeen → mieru) and shuffle devices between them from the UI.
 
+After every NDMS table rebuild (any UI change, interface flap) the `netfilter.d` hook runs `S99mkeen ensure <table>`: it re-adds only what is missing in that table, atomically with `iptables-restore --noflush`, without deleting anything first. A cron job does the same once a minute in case NDMS changes a table without calling the hook. Restores are logged to `/opt/var/log/mkeen-netfilter.log`.
+
 ## Repository layout
 
 ```

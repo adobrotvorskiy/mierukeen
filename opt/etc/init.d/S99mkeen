@@ -226,6 +226,103 @@ ipt_down() {
     cleanup_rules
 }
 
+# Восстановление наших правил в одной таблице (nat | mangle) без
+# предварительного удаления. NDMS пересобирает таблицы по одной и после
+# каждой вызывает netfilter.d-хук; прежний путь (ipt-refresh: снести все
+# правила и добавить ~90 вызовами iptables) сам открывал окна, в которые
+# новые соединения политики шли мимо туннеля (Gemini 3 октября: «User
+# location is not supported»). iptables-restore --noflush очищает и заново
+# заполняет нашу цепочку одной транзакцией, переходы добавляет только
+# недостающие. В лог пишется только то, что пришлось восстановить.
+LOG_NETFILTER="$LOG/mkeen-netfilter.log"
+ENSURE_LOCK="$RUN/mkeen-ensure.lock"
+
+# Строка для iptables-restore, если такого правила в таблице ещё нет.
+rule_if_missing() {
+    table="$1"; shift
+    iptables -t "$table" -C "$@" 2>/dev/null || echo "-A $*"
+}
+
+ensure_nat() {
+    pmark="$1"
+    iptables -t nat -C PREROUTING -p tcp -m connmark --mark "$pmark" -m conntrack ! --ctstate INVALID -j "$CHAIN" 2>/dev/null \
+        && iptables -t nat -C "$CHAIN" -p tcp -j REDIRECT --to-ports "$TCP_PORT" 2>/dev/null \
+        && return 0
+    {
+        echo "*nat"
+        echo ":$CHAIN - [0:0]"
+        for exclude in $(exclude_list); do echo "-A $CHAIN -d $exclude -j RETURN"; done
+        for bypass in $(tcp_bypass_list); do echo "-A $CHAIN -s ${bypass%%:*} -p tcp -m tcp --sport ${bypass#*:} -j RETURN"; done
+        echo "-A $CHAIN -p tcp -j REDIRECT --to-ports $TCP_PORT"
+        rule_if_missing nat PREROUTING -p tcp -m connmark --mark "$pmark" -m conntrack ! --ctstate INVALID -j "$CHAIN"
+        echo "COMMIT"
+    } | iptables-restore --noflush || return 2
+    return 1
+}
+
+ensure_mangle() {
+    pmark="$1"
+    wan="$(wan_iface)"
+    restored=0
+    if ! ip rule show 2>/dev/null | grep -q "fwmark $TABLE_MARK.*lookup $TABLE_ID"; then
+        ip rule add fwmark "$TABLE_MARK" lookup "$TABLE_ID" pref "$TABLE_PREF" >/dev/null 2>&1 || true
+        ip route add local default dev lo table "$TABLE_ID" >/dev/null 2>&1 || true
+        copy_policy_bypass_routes "$pmark"
+        restored=1
+    fi
+    iptables -t mangle -C PREROUTING -p udp -m connmark --mark "$pmark" -m conntrack ! --ctstate INVALID -j "$CHAIN" 2>/dev/null \
+        && iptables -t mangle -C "$CHAIN" -p udp -m udp --dport 443 -j DROP 2>/dev/null \
+        && iptables -t mangle -C FORWARD -p tcp -m connmark --mark "$pmark" -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null \
+        && { [ -z "$wan" ] || iptables -t mangle -C POSTROUTING -o "$wan" -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; } \
+        && return "$restored"
+    {
+        echo "*mangle"
+        echo ":$CHAIN - [0:0]"
+        # TPROXY/socket на ядре Keenetic 4.9 не грузятся (см. ipt_up) — без них
+        # restore целиком упал бы, поэтому добавляем только если модули есть.
+        tproxy=0
+        grep -qx TPROXY /proc/net/ip_tables_targets 2>/dev/null && grep -qx socket /proc/net/ip_tables_matches 2>/dev/null && tproxy=1
+        [ "$tproxy" = 1 ] && echo "-A $CHAIN -p udp -m socket --transparent -j MARK --set-mark $TABLE_MARK"
+        for exclude in $(exclude_list); do echo "-A $CHAIN -d $exclude -j RETURN"; done
+        [ "$tproxy" = 1 ] && echo "-A $CHAIN -p udp -j TPROXY --on-ip 127.0.0.1 --on-port $UDP_PORT --tproxy-mark $TABLE_MARK"
+        echo "-A $CHAIN -p udp -m udp --dport 443 -j DROP"
+        rule_if_missing mangle PREROUTING -p udp -m connmark --mark "$pmark" -m conntrack ! --ctstate INVALID -j "$CHAIN"
+        rule_if_missing mangle FORWARD -p tcp -m connmark --mark "$pmark" -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+        [ -n "$wan" ] && rule_if_missing mangle POSTROUTING -o "$wan" -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+        echo "COMMIT"
+    } | iptables-restore --noflush || return 2
+    return 1
+}
+
+# ensure [nat|mangle] [источник для лога]; без таблицы — обе. При лежащем
+# sing-box ничего не делаем: редирект на мёртвый порт отрезал бы политику
+# от сети, а стек с правилами поднимут watchdog и netfilter-хук.
+do_ensure() {
+    pmark="$(read_policy_mark)"
+    [ -n "$pmark" ] || return 0
+    pidof sing-box >/dev/null 2>&1 || return 0
+    waited=0
+    until mkdir "$ENSURE_LOCK" 2>/dev/null; do
+        waited=$((waited + 1))
+        [ "$waited" -ge 10 ] && { rm -rf "$ENSURE_LOCK"; continue; }  # зависший замок старше ~5 с
+        usleep 500000 2>/dev/null || sleep 1
+    done
+    for table in ${1:-nat mangle}; do
+        case "$table" in
+            nat)    ensure_nat "$pmark" ;;
+            mangle) ensure_mangle "$pmark" ;;
+            *)      continue ;;
+        esac
+        case $? in
+            0) ;;
+            1) echo "$(date '+%F %T') $table restored (${2:-manual})" >> "$LOG_NETFILTER" ;;
+            *) echo "$(date '+%F %T') $table restore failed (${2:-manual}), full refresh" >> "$LOG_NETFILTER"
+               ipt_down; ipt_up >/dev/null ;;
+        esac
+    done
+    rm -rf "$ENSURE_LOCK"
+}
+
 do_start() {
     [ -d "$ACTIVE" ] || ln -sfn "$CONF/profiles/default" "$ACTIVE"
     [ -x "$MIERU_BIN" ]   || { echo "нет $MIERU_BIN"; exit 1; }
@@ -300,5 +397,6 @@ case "$1" in
             && pidof sing-box >/dev/null 2>&1
         ;;
     ipt-refresh) ipt_down; ipt_up ;;
-    *)           echo "usage: $0 {start|stop|restart|status|check|ipt-refresh}"; exit 1 ;;
+    ensure)      do_ensure "$2" "$3" ;;
+    *)           echo "usage: $0 {start|stop|restart|status|check|ipt-refresh|ensure [nat|mangle] [source]}"; exit 1 ;;
 esac
