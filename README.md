@@ -87,6 +87,10 @@ Rules are written straight into the active profile's `singbox.json` and tagged w
 
 For anything more complex, edit `singbox.json` by hand — see the [sing-box docs](https://sing-box.sagernet.org/configuration/route/).
 
+### Bypassing the tunnel by source port
+
+If a device is in the policy but some of its TCP should go direct (typically a torrent client whose peers flood the tunnel), list the client's outgoing ports in `/opt/etc/mkeen/tcp_bypass`: `ip:port` or `ip:port_min:port_max`, one entry per line. For example, `192.168.1.50:49100:49299` with a fixed outgoing port range in qBittorrent. Then `mkeen -restart`.
+
 ## Remote control via Karing / yacd
 
 The default `singbox.json` ships with Clash API enabled on `127.0.0.1:9090` with placeholder secret `CHANGE_ME_CLASH_SECRET`. Expose it on the LAN interface, set your own secret, and point Karing / yacd / metacubexd at it as if it were a local client. Routes can be flipped live without editing configs.

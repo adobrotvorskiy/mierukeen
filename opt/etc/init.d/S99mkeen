@@ -47,6 +47,11 @@ export HOME="$MIERU_STATE"
 CHAIN="MIERUKEEN"
 CHAIN_MASK="MIERUKEEN_MASK"
 POLICY_MARK_FILE="$CONF/policy_mark"
+# TCP-источники, которые идут мимо туннеля, даже если устройство в политике
+# (например, торрент-клиент: его пиры забивают тоннель). Записи через пробел
+# или с новой строки: ip:порт или ip:порт_min:порт_max (исходящие порты
+# клиента), строки с # — комментарии. Нет файла — нет исключений.
+TCP_BYPASS_FILE="$CONF/tcp_bypass"
 TABLE_ID="100"
 TABLE_MARK="0x1ab"       # см. (1) выше
 TABLE_PREF="8"           # см. (2) выше
@@ -83,6 +88,10 @@ exclude_list() {
     wan="$(wan_ipv4)"
     [ -n "$wan" ] && printf '%s/32 ' "$wan"
     printf '%s\n' "$IPV4_EXCLUDE"
+}
+
+tcp_bypass_list() {
+    grep -v '^[[:space:]]*#' "$TCP_BYPASS_FILE" 2>/dev/null
 }
 
 # Копируем non-default маршруты из NDMS-таблицы политики в нашу (100),
@@ -162,6 +171,9 @@ ipt_up() {
     # TCP: nat REDIRECT (TPROXY для TCP на Linux 4.9 не доставляет пакет).
     iptables -t nat -N "$CHAIN" 2>/dev/null || true
     add_exclude_rules nat "$CHAIN"
+    for bypass in $(tcp_bypass_list); do
+        iptables -t nat -A "$CHAIN" -s "${bypass%%:*}" -p tcp --sport "${bypass#*:}" -j RETURN >/dev/null 2>&1
+    done
     iptables -t nat -A "$CHAIN" -p tcp -j REDIRECT --to-ports "$TCP_PORT" >/dev/null 2>&1
 
     # UDP: mangle TPROXY на 127.0.0.1:UDP_PORT с нашим internal mark.
